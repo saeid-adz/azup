@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.6.2
+- Repository hardening: protected `main` and release tags, immutable releases, CodeQL, Dependabot, secret scanning, pinned least-privilege CI, SECURITY.md / CONTRIBUTING / issue and PR templates.
+- CI: fixed the Python 3.8 job on Ubuntu, added unit tests and installer syntax checks to every run.
+- Files are now always closed after reading/writing (avoids locked files on Windows).
+
 ## 2.6.1
 - Windows: fix `azup install kubelogin` ("No package found matching input criteria"). The winget id is `Microsoft.Azure.Kubelogin`.
 - CI now verifies every winget id against the winget package repository, so a wrong id fails the build instead of reaching users.

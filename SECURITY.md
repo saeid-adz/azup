@@ -31,10 +31,10 @@ The one-line installers download `azup.py` from this repository. To avoid trusti
 pin a release tag, which is immutable:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.6.1 sh
+curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.6.2 sh
 ```
 ```powershell
-$env:AZUP_BRANCH = 'v2.6.1'; irm https://raw.githubusercontent.com/saeid-adz/azup/main/install.ps1 | iex
+$env:AZUP_BRANCH = 'v2.6.2'; irm https://raw.githubusercontent.com/saeid-adz/azup/main/install.ps1 | iex
 ```
 
 Prefer to read first? Both scripts are short, and `azup.py` is a single file with no dependencies.
