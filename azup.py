@@ -54,7 +54,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -351,7 +351,7 @@ CATALOG: List[Tool] = [
          brew="azure/functions/azure-functions-core-tools@4",
          winget="Microsoft.Azure.FunctionsCoreTools", cmd="func", repo="Azure/azure-functions-core-tools"),
     Tool("kubelogin", "kubelogin", "CLI", "pkg", "Entra auth for AKS",
-         brew="azure/kubelogin/kubelogin", winget="Azure.Kubelogin", cmd="kubelogin", repo="Azure/kubelogin"),
+         brew="azure/kubelogin/kubelogin", winget="Microsoft.Azure.Kubelogin", cmd="kubelogin", repo="Azure/kubelogin"),
     Tool("kubectl", "kubectl", "CLI", "pkg", "Kubernetes CLI",
          brew="kubernetes-cli", winget="Kubernetes.kubectl", cmd="kubectl",
          vcmd=("kubectl", "version", "--client"), repo="kubernetes/kubernetes"),

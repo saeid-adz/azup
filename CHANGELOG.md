@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.6.1
+- Windows: fix `azup install kubelogin` ("No package found matching input criteria"). The winget id is `Microsoft.Azure.Kubelogin`.
+- CI now verifies every winget id against the winget package repository, so a wrong id fails the build instead of reaching users.
+
 ## 2.6.0
 - **Parallel installs and updates.** Work runs in lanes (Homebrew, PowerShell Az, PowerShell Graph/Entra, `az`, `azd`, winget, tarball) with a live status board. Homebrew formulas are batched into one `brew` call, steps wait for the tools they depend on (PowerShell → modules, az → extensions, azd → azd extensions), and anything that may prompt (macOS casks, trusting a tap) runs on its own with a real terminal.
 - `-j/--jobs N` (default 4; `-j 1` = sequential; env `AZUP_JOBS`) on `install`, `update` and `select`.
