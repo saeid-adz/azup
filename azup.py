@@ -39,7 +39,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -520,10 +520,27 @@ def ensure_manager(mgr, dry, yes):
             return True
         if not confirm("Install Homebrew now?", yes):
             return False
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            print(red("  Homebrew refuses to install as root. Run azup as a normal user that has sudo."))
+            return False
+        if not have("sudo"):
+            print(red("  Homebrew needs sudo to create its install directory, and sudo is missing."))
+            print("    Install sudo (or ask an admin), then re-run azup.")
+            return False
+        # The installer runs non-interactively, so authenticate sudo here where it can prompt.
+        print(dim("  Homebrew needs administrator rights to create its directory – enter your password:"))
+        if subprocess.call(["sudo", "-v"]) != 0:
+            print(red("  sudo authentication failed."))
+            return False
         rc = subprocess.call(["/bin/bash", "-c", 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL '
                               'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'])
         refresh_path()
-        return rc == 0 and have("brew")
+        if rc != 0 or not have("brew"):
+            if IS_LINUX:
+                print(yellow("  Homebrew on Linux needs build tools. On Ubuntu/Debian:\n"
+                             "    sudo apt update && sudo apt install -y build-essential procps curl file git"))
+            return False
+        return True
     hints = {"winget": "winget ships with Windows 10/11 ('App Installer' in the Microsoft Store).",
              "snap": "snap is not available – install PowerShell via "
                      "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux"}
