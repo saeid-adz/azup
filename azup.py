@@ -39,7 +39,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -900,9 +900,6 @@ def cmd_self_update(a):
     if "site-packages" in here or "dist-packages" in here:
         print(yellow("  azup was installed with pip/pipx – run:  pipx upgrade azup"))
         return 0
-    if REPO.startswith("saeid-adz"):
-        print(red("  REPO is not configured. Set AZUP_REPO=owner/repo or edit REPO in azup.py."))
-        return 1
     url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/azup.py"
     try:
         with Spinner("checking GitHub…"):

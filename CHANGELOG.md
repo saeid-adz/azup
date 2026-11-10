@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.0.3
+- Fix `azup self-update` always reporting "REPO is not configured".
+
 ## 2.0.2
 - Linux: authenticate `sudo` before the non-interactive Homebrew installer; clear errors for root / missing sudo / missing build tools.
 
