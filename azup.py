@@ -47,7 +47,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -406,7 +406,8 @@ def refresh_path():
                         parts.append(os.path.expandvars(winreg.QueryValueEx(k, "Path")[0]))
                 except OSError:
                     pass
-            os.environ["PATH"] = os.pathsep.join(parts + [os.environ.get("PATH", "")])
+            wa = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps")   # winget lives here
+            os.environ["PATH"] = os.pathsep.join(parts + [wa, os.environ.get("PATH", "")])
         except ImportError:
             pass
     else:
@@ -889,7 +890,18 @@ def ensure_manager(mgr, dry, yes):
                              "    sudo apt update && sudo apt install -y build-essential procps curl file git"))
             return False
         return True
-    hints = {"winget": "winget ships with Windows 10/11 ('App Installer' in the Microsoft Store).",
+    if mgr == "winget" and IS_WIN and not dry:
+        # Fresh Windows installs often have App Installer but haven't registered it for this user yet.
+        print(dim("  winget not found – trying to register 'App Installer'…"))
+        subprocess.call(["powershell", "-NoProfile", "-Command",
+                         "Add-AppxPackage -RegisterByFamilyName -MainPackage "
+                         "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        refresh_path()
+        if have("winget"):
+            return True
+    hints = {"winget": "winget ships with Windows 10/11 – update 'App Installer' in the Microsoft Store "
+                       "(or https://aka.ms/getwinget), then re-run azup.",
              "snap": "snap is not available – install PowerShell via "
                      "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux"}
     print(red(f"  '{mgr}' not found. ") + hints.get(mgr, ""))

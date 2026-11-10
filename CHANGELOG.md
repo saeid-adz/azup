@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.1
+- Windows installer: works on a fresh Windows 11 with no Python and no registered winget. It registers winget (App Installer) if needed and otherwise installs Python straight from python.org (per user, no admin rights).
+- azup itself tries to register winget before giving up, and finds it in `%LOCALAPPDATA%\Microsoft\WindowsApps`.
+
 ## 2.2.0
 - Linux: PowerShell is now installed from Microsoft's official release tarball into `~/.local` – no snap, no sudo, SHA-256 verified, updatable with `azup update`.
 - A tool found on PATH that doesn't even start (e.g. a broken snap `pwsh`) is treated as not installed, so azup can replace it.
