@@ -54,7 +54,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 

@@ -59,7 +59,7 @@ pipx install git+https://github.com/saeid-adz/azup
 
 Open a new terminal and type `azup`. That's the whole setup. (Yes, really. Go get a coffee, or don't – we're not your manager.)
 
-> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.6.1 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.6.1'` first).
+> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.6.2 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.6.2'` first).
 
 > Prefer to read before you pipe to a shell? Good instincts. [`install.sh`](install.sh) and [`install.ps1`](install.ps1) are short and boring on purpose.
 
