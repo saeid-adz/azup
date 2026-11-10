@@ -39,7 +39,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -536,10 +536,46 @@ def stream(cmd, dry):
     if dry:
         return True
     try:
+        if cmd[0] == "brew":
+            rc, out = run_tee(cmd)
+            if rc != 0 and "untrusted tap" in out and trust_tap(out):
+                rc, _ = run_tee(cmd)          # retry once after trusting
+            return rc == 0
         return subprocess.call(resolve_exe(cmd)) == 0
     except OSError as e:
         print(red(f"    {e}"))
         return False
+
+
+def run_tee(cmd):
+    """Run a command, echo its output live and also return it."""
+    p = subprocess.Popen(resolve_exe(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding="utf-8", errors="replace")
+    buf = []
+    for line in p.stdout:
+        sys.stdout.write(line)
+        buf.append(line)
+    p.wait()
+    return p.returncode, "".join(buf)
+
+
+TRUST_HINT = re.compile(r"`brew trust ((?:--\w+ )?[\w./@+-]+)`")
+
+
+def trust_tap(output):
+    """Homebrew refuses taps it does not trust. Show the fix; apply it if the user agrees."""
+    m = TRUST_HINT.search(output)
+    if not m:
+        return False
+    args = m.group(1).split()
+    cmd = ["brew", "trust"] + args
+    print(f"\n  {yellow('▲')} Homebrew refuses to load from a tap you haven't trusted "
+          f"({bold(args[-1])}).")
+    print(dim("    Trusting lets Homebrew run that tap's formulae/casks. Only do this for sources you rely on."))
+    if not confirm(f"Run `{' '.join(cmd)}` and retry?"):
+        print(f"    To fix it yourself run:  {bold(' '.join(cmd))}")
+        return False
+    return subprocess.call(resolve_exe(cmd)) == 0
 
 
 Action = Tuple[Tool, str]
