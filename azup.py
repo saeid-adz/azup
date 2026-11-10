@@ -7,6 +7,8 @@
     azup install [...]    install tools  (names, --profile core|full, --all; no args = checklist)
     azup update  [...]    update tools   (default: everything outdated)
     azup doctor           sign-in + health checks
+    azup whoami           who am I signed in as, in az / azd / Az PowerShell / Graph?
+    azup ctx [name]       switch subscription everywhere at once (type-to-filter picker)
     azup login [target]   az | azd | ps | graph | all
     azup self-update      update azup itself
     azup joke             Azzy tells a joke (animations: --no-anim or AZUP_NO_ANIM=1 to disable)
@@ -47,7 +49,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.2.2"
+VERSION = "2.3.0"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -55,6 +57,7 @@ IS_WIN = os.name == "nt"
 IS_MAC = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
 OS_NAME = "Windows" if IS_WIN else "macOS" if IS_MAC else "Linux"
+OS_KEY = "win" if IS_WIN else "mac" if IS_MAC else "linux"
 
 if IS_WIN:
     os.system("")  # enables ANSI escape processing in the Windows console
@@ -320,7 +323,10 @@ class Tool:
     ghtar: str = ""           # GitHub repo whose release tarball is installed to ~/.local (Linux, no sudo)
     cmd: str = ""             # binary name, used to spot installs made outside azup
     vcmd: Tuple[str, ...] = ()
-    pkg: str = ""             # module / extension name for psmod / azext
+    pkg: str = ""             # module / extension name for psmod / azext / azdext
+    ai: bool = False          # part of `--profile ai`
+    platforms: Tuple[str, ...] = ()   # limit a pkg to these OSes: "win", "mac", "linux"
+    min_azd: str = ""         # azd extensions: minimum azd version
 
     @property
     def short(self):
@@ -362,12 +368,24 @@ CATALOG: List[Tool] = [
          pkg="azure-devops"),
     Tool("ext-aks", "ext: aks-preview", "az extensions", "azext", "AKS preview features",
          pkg="aks-preview"),
+    # ── Microsoft Foundry / AI ──
+    Tool("foundry-local", "Foundry Local", "AI", "pkg", "run models on your machine (preview)",
+         ai=True, brew="microsoft/foundrylocal/foundrylocal", winget="Microsoft.FoundryLocal",
+         cmd="foundry", platforms=("win", "mac")),
+    Tool("azd-foundry", "azd: Microsoft Foundry", "AI", "azdext", "Foundry bundle for azd (agents, models…)",
+         ai=True, pkg="microsoft.foundry", min_azd="1.37.0"),
+    Tool("azd-agents", "azd: AI agents", "AI", "azdext", "scaffold / deploy hosted agents",
+         pkg="azure.ai.agents", min_azd="1.25.0"),
+    Tool("ext-ml", "ext: ml (Azure ML)", "AI", "azext", "Azure ML v2 + Foundry hubs for az",
+         ai=True, pkg="ml"),
 ]
 
 
 def spec(t: Tool) -> Optional[Tuple[str, str]]:
     """(manager, package-id) for a 'pkg' tool on this OS, else None."""
     if t.kind != "pkg":
+        return None
+    if t.platforms and OS_KEY not in t.platforms:
         return None
     if IS_WIN:
         return ("winget", t.winget) if t.winget else None
@@ -680,6 +698,17 @@ def detect(check_latest=True) -> Dict[str, State]:
         except ValueError:
             return {}
 
+    def azd_exts():
+        if not have("azd"):
+            return {}
+        rc, out = run(["azd", "extension", "list", "--output", "json"], 60)
+        try:
+            d = json.loads(out[out.index("["): out.rindex("]") + 1])
+        except ValueError:
+            return {}
+        return {e["id"]: (e.get("installedVersion") or "", e.get("version") or "")
+                for e in d if e.get("installedVersion")}
+
     def bicep_v():
         if not have("az"):
             return ""
@@ -697,6 +726,7 @@ def detect(check_latest=True) -> Dict[str, State]:
     with cf.ThreadPoolExecutor(12) as ex:
         f_bl, f_bo = ex.submit(brew_list), ex.submit(brew_out)
         f_pi, f_ae, f_bv = ex.submit(ps_installed), ex.submit(az_exts), ex.submit(bicep_v)
+        f_ax = ex.submit(azd_exts)
         pm = {}
         for t in TOOLS:
             s = specs[t.key]
@@ -707,6 +737,7 @@ def detect(check_latest=True) -> Dict[str, State]:
             elif s and s[0] == "tarball":
                 pm[t.key] = ex.submit(tarball_state, s[1], check_latest)
         bl, bo, pi, ae, bv = (f.result() for f in (f_bl, f_bo, f_pi, f_ae, f_bv))
+        ax = f_ax.result()
         f_pl, f_el = ex.submit(ps_latest, pi), ex.submit(az_ext_latest, ae)
         ext_f = {}
         for t in TOOLS:
@@ -740,6 +771,9 @@ def detect(check_latest=True) -> Dict[str, State]:
             s.installed, s.version, s.latest = True, pi[t.pkg], pl.get(t.pkg, "")
         elif t.kind == "azext" and t.pkg in ae:
             s.installed, s.version, s.latest = True, ae[t.pkg], el.get(t.pkg, "")
+        elif t.kind == "azdext" and t.pkg in ax:
+            s.installed, s.version = True, ax[t.pkg][0]
+            s.latest = ax[t.pkg][1] if check_latest else ""
         elif t.kind == "bicep" and bv:
             s.installed, s.version = True, bv
     return st
@@ -796,13 +830,15 @@ def build_cmd(t: Tool, verb: str):
         return ps_cmd(f"Update-Module {t.pkg} -Force -ErrorAction Stop")
     if t.kind == "azext":
         return ["az", "extension", "add", "-n", t.pkg, "--upgrade", "-y"]
+    if t.kind == "azdext":
+        return ["azd", "extension", "install" if inst else "update", t.pkg]
     return ["az", "bicep", "install" if inst else "upgrade"]
 
 
 def requires(t: Tool):
     if t.kind == "pkg":
         return "" if spec(t)[0] == "tarball" else spec(t)[0]     # tarball needs no package manager
-    return "powershell" if t.kind == "psmod" else "az"
+    return {"psmod": "powershell", "azdext": "azd"}.get(t.kind, "az")
 
 
 _PS_CHECK = {}
@@ -968,7 +1004,7 @@ def execute(actions: List[Action], dry=False, yes=False):
     if not actions:
         print(f"  {green('✔')} nothing to do.\n")
         return True
-    rank = {"pkg": 0, "bicep": 2, "psmod": 1, "azext": 2}
+    rank = {"pkg": 0, "bicep": 2, "psmod": 1, "azext": 2, "azdext": 2}
     actions = sorted(actions, key=lambda a: rank[a[0].kind])
     for mgr in sorted({requires(t) for t, _ in actions if t.kind == "pkg"} - {""}):
         if not ensure_manager(mgr, dry, yes):
@@ -987,6 +1023,14 @@ def execute(actions: List[Action], dry=False, yes=False):
             results.append((t, verb, False, 0.0, f"needs {req} – install it first"))
             print(f"\n  {red('✘')} {t.name}: needs {bold(req)} – install it first")
             continue
+        if not dry and t.kind == "azdext" and t.min_azd:
+            rc_, out_ = run(["azd", "version"], 20)
+            m_ = re.search(r"(\d+\.\d+\.\d+)", out_)
+            have_v = m_.group(1) if m_ else "0"
+            if vtuple(have_v) < vtuple(t.min_azd):
+                results.append((t, verb, False, 0.0, f"needs azd >= {t.min_azd} (you have {have_v}) – update azd first"))
+                print(f"\n  {red('✘')} {t.name}: needs azd >= {t.min_azd} (you have {have_v}) – update azd first")
+                continue
         if not dry and t.kind == "psmod":
             works, info = ps_works()
             if not works:
@@ -1160,7 +1204,8 @@ def select_flow(st=None, dry=False, yes=False):
                pick_where(lambda s, t: s.outdated),
                {b"u": ("outdated", lambda: pick_where(lambda s, t: s.outdated)),
                 b"m": ("missing", lambda: pick_where(lambda s, t: not s.installed)),
-                b"c": ("core", lambda: pick_where(lambda s, t: t.core))})
+                b"c": ("core", lambda: pick_where(lambda s, t: t.core)),
+                b"i": ("ai", lambda: pick_where(lambda s, t: t.core or t.ai))})
     if not sel:
         return True
     actions: List[Action] = []
@@ -1205,6 +1250,7 @@ def cmd_install(a):
         return cmd_select(a)
     st = load(False)
     tools = [t for t in TOOLS if t.core] if a.profile == "core" else \
+        [t for t in TOOLS if t.core or t.ai] if a.profile == "ai" else \
         list(TOOLS) if (a.all or a.profile == "full") else resolve(a.names)
     todo = [(t, "install") for t in tools if not st[t.key].installed]
     skipped = [t.name for t in tools if st[t.key].installed]
@@ -1225,10 +1271,13 @@ def cmd_update(a):
 
 def cmd_login(a):
     pw = ps_exe() or "pwsh"
-    steps = {"az": ["az", "login"], "azd": ["azd", "auth", "login"],
-             "ps": [pw, "-NoProfile", "-Command", "Connect-AzAccount"],
+    tid = getattr(a, "tenant", None)
+    steps = {"az": ["az", "login"] + (["--tenant", tid] if tid else []),
+             "azd": ["azd", "auth", "login"] + (["--tenant-id", tid] if tid else []),
+             "ps": [pw, "-NoProfile", "-Command", "Connect-AzAccount" + (f" -Tenant '{tid}'" if tid else "")],
              "graph": [pw, "-NoProfile", "-Command",
-                       "Connect-MgGraph -Scopes 'User.Read.All','Group.Read.All','Directory.Read.All'"]}
+                       "Connect-MgGraph " + (f"-TenantId '{tid}' " if tid else "") +
+                       "-Scopes 'User.Read.All','Group.Read.All','Directory.Read.All'"]}
     for k in (list(steps) if a.target == "all" else [a.target]):
         if not have(steps[k][0]):
             print(yellow(f"  {steps[k][0]} not installed – skipping {k}"))
@@ -1284,6 +1333,220 @@ def cmd_doctor(a):
         "everything installed is up to date")
     print()
     return 0
+
+
+# ───────────────────────────── identity: whoami / ctx ─────────────────────────────
+def clip(text, w):
+    return text if len(text) <= w else text[: w - 1] + "…"
+
+
+def gather_context():
+    """Who/where each tool is signed in as. Returns {tool: dict | None (not installed)}."""
+    def az_ctx():
+        if not have("az"):
+            return None
+        rc, out = run(["az", "account", "show", "-o", "json"], 30)
+        if rc:
+            return {"in": False}
+        d = json.loads(out)
+        return {"in": True, "account": d.get("user", {}).get("name", "?"), "sub": d["name"],
+                "sub_id": d["id"], "tenant": d["tenantId"]}
+
+    def azd_ctx():
+        if not have("azd"):
+            return None
+        rc, out = run(["azd", "auth", "login", "--check-status"], 20)
+        m = re.search(r"as (\S+)", out)
+        sub_id = ""
+        rc2, o2 = run(["azd", "config", "get", "defaults.subscription"], 15)
+        if rc2 == 0 and o2 and not o2.lstrip().startswith("{"):
+            sub_id = o2.strip().strip('"')
+        return {"in": rc == 0, "account": m.group(1) if m else "", "sub_id": sub_id}
+
+    def ps_ctx():
+        if not ps_exe():
+            return None, None
+        body = ("$r=@{az=$null;mg=$null};"
+                "try{$c=Get-AzContext;if($c){$r.az=@{account=$c.Account.Id;sub=$c.Subscription.Name;"
+                "sub_id=$c.Subscription.Id;tenant=$c.Tenant.Id}}}catch{};"
+                "try{$g=Get-MgContext;if($g){$r.mg=@{account=$g.Account;tenant=$g.TenantId}}}catch{};"
+                "$r|ConvertTo-Json -Compress -Depth 4")
+        rc, out = run(ps_cmd(body), 90)
+        try:
+            d = json.loads(out)
+        except ValueError:
+            d = {}
+        z, g = d.get("az"), d.get("mg")
+        return ({"in": bool(z), **(z or {})}, {"in": bool(g), **(g or {})})
+
+    with cf.ThreadPoolExecutor(3) as ex:
+        fa, fd, fp = ex.submit(az_ctx), ex.submit(azd_ctx), ex.submit(ps_ctx)
+        res = {"az": fa.result(), "azd": fd.result()}
+        res["ps"], res["graph"] = fp.result()
+    return res
+
+
+def cmd_whoami(a):
+    refresh_path()
+    banner()
+    with Spinner("asking every tool who you are…", mascot=True):
+        c = gather_context()
+    rows = [("Azure CLI", "az", "az login"), ("Azure Developer CLI", "azd", "azd auth login"),
+            ("Az PowerShell", "ps", "azup login ps"), ("Microsoft Graph", "graph", "azup login graph")]
+    print("  " + bold("Who am I?") + "\n")
+    for label, key, fix in rows:
+        d = c.get(key)
+        if d is None:
+            print(f"   {pad(bold(label), 24)}{dim('○ not installed')}")
+        elif not d.get("in"):
+            print(f"   {pad(bold(label), 24)}{yellow('▲ not signed in')}  {dim('→ ' + fix)}")
+        else:
+            bits = [d.get("account", "")]
+            if d.get("sub"):
+                bits.append(f"{clip(d['sub'], 34)} ({d['sub_id'][:8]})")
+            elif d.get("sub_id"):
+                bits.append(f"default sub {d['sub_id'][:8]}")
+            if d.get("tenant"):
+                bits.append(f"tenant {d['tenant'][:8]}")
+            print(f"   {pad(bold(label), 24)}{green('✔')} {dim(' · ').join(x for x in bits if x)}")
+    az, ps, g = c.get("az") or {}, c.get("ps") or {}, c.get("graph") or {}
+    drift = []
+    if az.get("in") and ps.get("in") and az["sub_id"] != ps.get("sub_id"):
+        drift.append(f"Az PowerShell is on '{clip(ps.get('sub', '?'), 30)}', az is on '{clip(az['sub'], 30)}'")
+    if az.get("in") and g.get("in") and az["tenant"] != g.get("tenant"):
+        drift.append("Microsoft Graph is signed in to a different tenant than az")
+    print()
+    if drift:
+        for d in drift:
+            print(f"   {yellow('▲')} {d}")
+        print(dim("     fix it with:  azup ctx\n"))
+    elif az.get("in"):
+        print(f"   {green('✔')} everything points at the same place\n")
+    return 0
+
+
+def pick_filter(title, items, current=None, page=12):
+    """Type-to-filter list. items = [(label, hint, value)]. Returns a value or None."""
+    if not interactive_ok():
+        return None
+    q, first, H = "", True, page + 3
+
+    def matches():
+        words = q.lower().split()
+        return [i for i, (l, h, v) in enumerate(items) if all(w in (l + " " + h).lower() for w in words)]
+
+    m = matches()
+    cur = next((j for j, i in enumerate(m) if items[i][2] == current), 0)
+    sys.stdout.write("\x1b[?25l")
+    try:
+        while True:
+            if not first:
+                sys.stdout.write(f"\x1b[{H}A")
+            first = False
+            start = max(0, min(cur - page // 2, len(m) - page)) if len(m) > page else 0
+            lines = [f"\x1b[K  {bold(title)}",
+                     f"\x1b[K  {azure('›')} {q}{dim('▏')}   {dim(f'{len(m)}/{len(items)}')}"]
+            for r in range(page):
+                j = start + r
+                if j < len(m):
+                    lab, hint, _ = items[m[j]]
+                    ptr = azure("❯") if j == cur else " "
+                    lines.append(f"\x1b[K   {ptr} {pad(bold(clip(lab, 40)) if j == cur else clip(lab, 40), 42)} {dim(hint)}")
+                else:
+                    lines.append("\x1b[K")
+            lines.append(f"\x1b[K  {dim('type to filter · ↑/↓ move · enter select · esc cancel')}")
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            k = read_key()
+            if k == b"\x03":
+                raise KeyboardInterrupt
+            if k == b"\x1b":
+                return None
+            if k == b"\x1b[A":
+                cur = max(0, cur - 1)
+            elif k == b"\x1b[B":
+                cur = min(max(len(m) - 1, 0), cur + 1)
+            elif k in (b"\r", b"\n"):
+                if m:
+                    return items[m[cur]][2]
+            elif k in (b"\x7f", b"\x08"):
+                q, m, cur = q[:-1], None, 0
+                m = matches()
+            elif len(k) == 1 and 32 <= k[0] < 127:
+                q += k.decode()
+                m, cur = matches(), 0
+    finally:
+        sys.stdout.write(f"\x1b[{H}A\x1b[J\x1b[?25h")
+
+
+def set_context(sub):
+    """Point az, azd and Az PowerShell at one subscription. Graph is tenant-scoped: hint only."""
+    sid, tid, name = sub["id"], sub["tenantId"], sub["name"]
+    print(f"\n  {azure('▶')} {bold('Switching to ' + clip(name, 50))}  {dim(sid)}")
+    ok = True
+    rc, _ = run(["az", "account", "set", "--subscription", sid], 30)
+    print(f"   {green('✔') if rc == 0 else red('✘')} Azure CLI")
+    ok &= rc == 0
+    if have("azd"):
+        rc, _ = run(["azd", "config", "set", "defaults.subscription", sid], 20)
+        print(f"   {green('✔') if rc == 0 else yellow('▲')} azd default subscription")
+    if ps_exe():
+        body = ("try{$c=Get-AzContext;if($c){Set-AzContext -SubscriptionId '%s' -TenantId '%s' "
+                "-ErrorAction Stop|Out-Null;'ok'}else{'none'}}catch{'fail'}" % (sid, tid))
+        with Spinner("switching Az PowerShell…"):
+            rc, out = run(ps_cmd(body), 90)
+        res = out.strip().splitlines()[-1] if out.strip() else "fail"
+        if res == "ok":
+            print(f"   {green('✔')} Az PowerShell")
+        elif res == "none":
+            print(f"   {dim('·')} Az PowerShell {dim('(not signed in – azup login ps)')}")
+        else:
+            print(f"   {yellow('▲')} Az PowerShell {dim('(could not switch – try: azup login ps --tenant ' + tid + ')')}")
+    print(f"   {dim('·')} Microsoft Graph {dim('is tenant-scoped – if you changed tenant: azup login graph --tenant ' + tid)}\n")
+    return ok
+
+
+def cmd_ctx(a):
+    if not have("az"):
+        print(red("  Azure CLI is not installed  →  azup install az"))
+        return 1
+    with Spinner("loading your subscriptions…", mascot=True):
+        rc, out = run(["az", "account", "list", "--all", "-o", "json"], 90)
+    try:
+        subs = json.loads(out)
+    except ValueError:
+        subs = []
+    if rc or not subs:
+        print(yellow("  no subscriptions found – sign in first:  azup login az"))
+        return 1
+    if not getattr(a, "all", False):
+        subs = [x for x in subs if x.get("state") == "Enabled"]      # disabled ones can't be used
+    subs.sort(key=lambda x: x["name"].lower())
+    cur = next((x["id"] for x in subs if x.get("isDefault")), None)
+    if a.list:
+        for x in subs:
+            print(f"  {green('●') if x['id'] == cur else ' '} {pad(clip(x['name'], 44), 46)}{dim(x['id'])}  "
+                  f"{dim(x.get('tenantDisplayName') or x['tenantId'][:8])}")
+        return 0
+    if a.query:
+        q = a.query.lower()
+        hit = [x for x in subs if q == x["id"].lower() or q in x["name"].lower()]
+        exact = [x for x in hit if q == x["id"].lower() or q == x["name"].lower()]
+        hit = exact or hit
+        if len(hit) != 1:
+            print(red(f"  '{a.query}' matches {len(hit)} subscriptions") + (":" if hit else "."))
+            for x in hit[:15]:
+                print(f"    {x['name']}  {dim(x['id'])}")
+            return 1
+        return 0 if set_context(hit[0]) else 1
+    items = [(x["name"], f"{x['id'][:8]} · {x.get('tenantDisplayName') or x['tenantId'][:8]}"
+              + ("" if x.get("state") == "Enabled" else f" · {x.get('state')}"), x) for x in subs]
+    chosen = pick_filter(f"Switch subscription ({len(subs)})", items, current=next((x for x in subs if x['id'] == cur), None))
+    if not chosen:
+        print("  cancelled.")
+        return 0
+    return 0 if set_context(chosen) else 1
+
 
 
 def cmd_self_update(a):
@@ -1348,12 +1611,14 @@ def interactive():
                 ("Update everything", f"{n_out} outdated", False),
                 ("Install core profile", "az, azd, bicep, PowerShell, Az, Graph, resource-graph", False),
                 ("Doctor", "sign-in & health", False),
+                ("Who am I?", "account + subscription in every tool", False),
+                ("Switch subscription…", "az + azd + Az PowerShell together", False),
                 ("Sign in…", "az / azd / PowerShell / Graph", False),
                 ("Update azup", "get the latest version of this tool", False),
                 ("Refresh", "re-scan", False),
                 ("Quit", "", False)]
         c = pick("What now?", rows, start=start)
-        if c is None or c == 7:
+        if c is None or c == 9:
             print()
             say("Bye! May all your deployments be green.")
             print()
@@ -1367,13 +1632,17 @@ def interactive():
         elif c == 3:
             cmd_doctor(None)
         elif c == 4:
+            cmd_whoami(None)
+        elif c == 5:
+            cmd_ctx(argparse.Namespace(query=None, list=False))
+        elif c == 6:
             s = pick("Sign in", [("Azure CLI", "az login", False), ("Azure Developer CLI", "azd auth login", False),
                                  ("Az PowerShell", "Connect-AzAccount", False), ("Microsoft Graph", "Connect-MgGraph", False)])
             if s is not None:
                 cmd_login(argparse.Namespace(target=["az", "azd", "ps", "graph"][s]))
-        elif c == 5:
+        elif c == 7:
             cmd_self_update(None)
-        if c != 6:
+        if c != 8:
             pause()
         st = load(True)
 
@@ -1396,7 +1665,8 @@ def main():
     sl.set_defaults(fn=cmd_select)
     i = sub.add_parser("install", aliases=["i"], help="install tools (no args = checklist)")
     i.add_argument("names", nargs="*")
-    i.add_argument("--profile", choices=["core", "full"])
+    i.add_argument("--profile", choices=["core", "full", "ai"],
+                   help="core | ai (core + Foundry / AI tooling) | full")
     i.add_argument("--all", action="store_true")
     flags(i)
     i.set_defaults(fn=cmd_install)
@@ -1405,8 +1675,15 @@ def main():
     flags(u)
     u.set_defaults(fn=cmd_update)
     sub.add_parser("doctor", help="health & sign-in checks").set_defaults(fn=cmd_doctor)
+    sub.add_parser("whoami", aliases=["who"], help="who am I signed in as, in every tool?").set_defaults(fn=cmd_whoami)
+    cx = sub.add_parser("ctx", help="switch subscription in az, azd and Az PowerShell at once")
+    cx.add_argument("query", nargs="?", help="subscription id or part of its name (omit for the picker)")
+    cx.add_argument("--list", action="store_true", help="just list subscriptions")
+    cx.add_argument("--all", action="store_true", help="include disabled subscriptions")
+    cx.set_defaults(fn=cmd_ctx)
     l = sub.add_parser("login", help="sign in")
     l.add_argument("target", nargs="?", default="az", choices=["az", "azd", "ps", "graph", "all"])
+    l.add_argument("--tenant", help="tenant id or domain to sign in to")
     l.set_defaults(fn=cmd_login)
     sub.add_parser("self-update", help="update azup itself").set_defaults(fn=cmd_self_update)
     sub.add_parser("joke", help="cheer me up").set_defaults(fn=cmd_joke)

@@ -30,7 +30,7 @@ brew upgrade azure-cli azd && pwsh -c "Update-Module Az, Microsoft.Graph" && az 
 
 **azup** keeps your Azure toolbox in one place:
 
-- 🧰 **Everything in one list** – Azure CLI, `azd`, Bicep, Az PowerShell, Microsoft Graph SDK, Entra PowerShell, `az` extensions, kubectl, kubelogin, AzCopy, Terraform and friends
+- 🧰 **Everything in one list** – Azure CLI, `azd`, Bicep, Az PowerShell, Microsoft Graph SDK, Entra PowerShell, `az` extensions, Foundry / AI tooling, kubectl, kubelogin, AzCopy, Terraform and friends
 - ✅ **One checklist** – tick what you want, azup installs the missing and updates the outdated
 - 🖥️ **Windows, macOS, Linux** – same commands everywhere (winget / Homebrew / PowerShell Gallery under the hood)
 - 🩺 **`azup doctor`** – are you actually signed in to `az`, `azd`, Az PowerShell and Graph? (Finally, an answer.)
@@ -71,6 +71,9 @@ azup install --profile core   # az, azd, Bicep, PowerShell, Az, Graph, resource-
 azup update                   # update everything that's outdated
 azup doctor                   # sign-in + health checks
 azup login all                # az, azd, Az PowerShell and Graph sign-in in one go
+azup whoami                   # who am I signed in as, in every tool?
+azup ctx                      # switch subscription everywhere at once (type to filter)
+azup install --profile ai     # core + Foundry / AI tooling
 azup self-update              # update azup itself
 azup joke                     # you've earned it
 ```
@@ -92,6 +95,48 @@ Add `-n/--dry-run` to see exactly what would run (changes nothing) and `-y/--yes
 ```
 
 Missing → **install**. Outdated → **update**. Already fine → left alone. You always get a plan and a "Proceed?" before anything happens.
+
+## Who am I? And where am I?
+
+Four tools, four separate sign-ins, four chances to deploy to the wrong subscription.
+
+```sh
+azup whoami
+```
+
+```text
+  Azure CLI               ✔ you@contoso.com · Prod-Platform (33b7b305) · tenant cf0683a7
+  Azure Developer CLI     ✔ you@contoso.com
+  Az PowerShell           ✔ you@contoso.com · Sandbox (d4b16185) · tenant cf0683a7
+  Microsoft Graph         ▲ not signed in  → azup login graph
+
+  ▲ Az PowerShell is on 'Sandbox', az is on 'Prod-Platform'
+    fix it with:  azup ctx
+```
+
+`azup whoami` warns when your tools disagree. `azup ctx` fixes it: pick a subscription once and `az`, `azd` and Az PowerShell all follow. Got hundreds of subscriptions? The picker filters as you type.
+
+```sh
+azup ctx                  # type-to-filter picker
+azup ctx prod-platform    # or jump straight there (id or part of the name)
+azup ctx --list           # just list them (add --all for disabled ones)
+azup login graph --tenant contoso.onmicrosoft.com   # Graph is tenant-scoped
+```
+
+## Microsoft Foundry & AI tooling
+
+```sh
+azup install --profile ai
+```
+
+| Component | What it is |
+|---|---|
+| **Foundry Local** (`foundry`) | run models on your own machine (preview; Windows and macOS) |
+| **azd: Microsoft Foundry** | the Foundry bundle for `azd` (needs azd 1.37+) |
+| **azd: AI agents** | scaffold and deploy hosted agents with `azd ai agent` |
+| **ext: ml** | Azure Machine Learning v2 / Foundry hubs for `az` |
+
+`azd` extensions are managed like everything else (`azup status`, `azup update`). azup checks your `azd` version first and tells you to update it if it's too old for an extension.
 
 ## Meet Azzy 🤖
 
@@ -121,7 +166,9 @@ Animations are tasteful and automatically off when you pipe output or run in CI.
 | Azure CLI, azd, Functions Core Tools, kubelogin, kubectl, AzCopy, sqlcmd, Terraform | Homebrew | Homebrew | winget |
 | PowerShell 7 | Homebrew cask | official release tarball → `~/.local` (no sudo, SHA-256 verified) | winget |
 | Az, Microsoft.Graph, Graph.Beta, Microsoft.Entra | PowerShell Gallery | PowerShell Gallery | PowerShell Gallery |
-| Bicep, `az` extensions (resource-graph, azure-devops, aks-preview) | `az` | `az` | `az` |
+| Bicep, `az` extensions (resource-graph, azure-devops, aks-preview, ml) | `az` | `az` | `az` |
+| `azd` extensions (Foundry, AI agents) | `azd` | `azd` | `azd` |
+| Foundry Local | Homebrew | – | winget |
 
 Things you installed some other way show up as **external** and are never touched. azup is a guest in your machine.
 

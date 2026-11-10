@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.0
+- **`azup whoami`**: account, subscription and tenant for `az`, `azd`, Az PowerShell and Microsoft Graph in one view, with a warning when they disagree.
+- **`azup ctx`**: switch subscription in `az`, `azd` and Az PowerShell at once, with a type-to-filter picker (works with hundreds of subscriptions). `azup ctx <name-or-id>` skips the picker.
+- **AI / Foundry**: new `AI` group and `azup install --profile ai`: Foundry Local (Windows/macOS), `azd` extensions (`microsoft.foundry`, `azure.ai.agents`, with an azd minimum-version check) and the `ml` extension for `az`.
+- `azup login --tenant <id>`; new menu entries "Who am I?" and "Switch subscription…".
+
 ## 2.2.2
 - Windows: fix `azup` failing with "Unknown option: -3". The generated launcher quoted `-3`, which the `py` launcher then passed on to python.exe.
 
