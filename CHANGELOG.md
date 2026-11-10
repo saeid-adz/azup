@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.5.0
+- **What's new before updating:** `azup changes [tools]`, `azup update --changes`, and a `c` option at the "Proceed?" prompt show release notes (GitHub releases, Azure CLI release notes, az-extension `HISTORY.rst`) for just the versions between yours and the latest.
+- **Terminal nudge:** `azup nudge enable` adds a one-line hook to your shell profile; once a day it prints "N tools outdated" from a background-refreshed cache (~70 ms). `nudge snooze|status|disable`.
+- **Scheduled updates:** `azup schedule enable|disable|status` using launchd (macOS), systemd user timer or cron (Linux), Task Scheduler (Windows). Unattended runs skip anything needing a password, log to `~/.azup/logs`, and are summarised in your next terminal.
+- Menu entries "What's new?" and "Notifications & auto-update…".
+- **Fix:** `azup install az` / `azup update az` resolved to the Az *PowerShell module* instead of Azure CLI (names are now matched case-sensitively first: `az` = Azure CLI, `Az` = PowerShell module; aliases `azps`, `graph`, `entra`).
+
 ## 2.3.0
 - **`azup whoami`**: account, subscription and tenant for `az`, `azd`, Az PowerShell and Microsoft Graph in one view, with a warning when they disagree.
 - **`azup ctx`**: switch subscription in `az`, `azd` and Az PowerShell at once, with a type-to-filter picker (works with hundreds of subscriptions). `azup ctx <name-or-id>` skips the picker.

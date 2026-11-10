@@ -71,6 +71,10 @@ azup install --profile core   # az, azd, Bicep, PowerShell, Az, Graph, resource-
 azup update                   # update everything that's outdated
 azup doctor                   # sign-in + health checks
 azup login all                # az, azd, Az PowerShell and Graph sign-in in one go
+azup changes                  # release notes for everything that's outdated
+azup update --changes         # read the notes first, then decide
+azup nudge enable             # "3 tools outdated" when you open a terminal
+azup schedule enable          # update automatically (weekly, Mondays 09:00)
 azup whoami                   # who am I signed in as, in every tool?
 azup ctx                      # switch subscription everywhere at once (type to filter)
 azup install --profile ai     # core + Foundry / AI tooling
@@ -95,6 +99,61 @@ Add `-n/--dry-run` to see exactly what would run (changes nothing) and `-y/--yes
 ```
 
 Missing → **install**. Outdated → **update**. Already fine → left alone. You always get a plan and a "Proceed?" before anything happens.
+
+## What's new before you update
+
+Updating blind is how Friday afternoons get interesting.
+
+```sh
+azup changes                 # release notes for every outdated tool
+azup changes azd Az          # or just some of them
+azup update --changes        # show the notes, then ask before updating
+```
+
+In the checklist (and in "Update everything") the confirmation prompt is `Proceed? [Y/n/c]` – press **c** to read what's new for the updates in your plan, then decide.
+
+```text
+  ▶ Azure Developer CLI  1.36.0 → 1.37.3
+    v1.37.3 2026-11-05
+      Features Added
+      • #10696 Add support for stable-to-stable azd update from an elevated terminal …
+      Bugs Fixed
+      • #10763 Fix workflow steps ignoring their explicit --cwd …
+      … +7 more lines  https://github.com/Azure/azure-dev/releases/tag/azure-dev-cli_1.37.3
+```
+
+Notes come straight from each project's own releases (GitHub releases, the Azure CLI release notes, and `HISTORY.rst` for `az` extensions), only for the versions between yours and the latest. No account needed; set `GITHUB_TOKEN` if you hit GitHub's anonymous rate limit.
+
+## Update nudges & scheduled updates
+
+**A short reminder when you open a terminal** (opt-in):
+
+```sh
+azup nudge enable      # adds a clearly marked one-line block to your shell profile (zsh / bash / PowerShell)
+```
+
+```text
+  ▟▙ azup 3 tools outdated (Azure Developer CLI, Az PowerShell, Functions Core Tools) → azup update · azup changes
+```
+
+At most one line a day, read from a small cache that refreshes in the background (the same lookups as `azup status`), so your shell starts instantly. It never installs anything. `azup nudge snooze 7d` quiets it, `azup nudge status` shows its state, `azup nudge disable` removes the block.
+
+**Optional automatic updates:**
+
+```sh
+azup schedule enable                      # weekly, Mondays 09:00
+azup schedule enable --daily --at 07:30   # or every morning
+azup schedule status
+azup schedule disable
+```
+
+| OS | Mechanism |
+|---|---|
+| macOS | a launchd agent (`~/Library/LaunchAgents`) |
+| Linux | a systemd user timer, or cron if systemd isn't available |
+| Windows | a Task Scheduler task (`azup-update`) |
+
+Unattended runs never prompt: anything that needs a password (for example the macOS PowerShell cask) is skipped and reported, and a log goes to `~/.azup/logs`. Your next terminal tells you what was updated. Use `azup schedule enable -n` to preview exactly what would be created. *(Scheduling on Linux and Windows is new – please open an issue if it misbehaves.)*
 
 ## Who am I? And where am I?
 

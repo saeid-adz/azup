@@ -7,6 +7,9 @@
     azup install [...]    install tools  (names, --profile core|full, --all; no args = checklist)
     azup update  [...]    update tools   (default: everything outdated)
     azup doctor           sign-in + health checks
+    azup changes [name]   release notes for what's outdated (or the named tools)
+    azup nudge [enable]   one-line "3 tools outdated" reminder when you open a terminal
+    azup schedule enable  update automatically (weekly/daily) via launchd / systemd / Task Scheduler
     azup whoami           who am I signed in as, in az / azd / Az PowerShell / Graph?
     azup ctx [name]       switch subscription everywhere at once (type-to-filter picker)
     azup login [target]   az | azd | ps | graph | all
@@ -23,10 +26,12 @@ import glob
 import hashlib
 import json
 import platform
+import plistlib
 import os
 import random
 import re
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -49,7 +54,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.3.0"
+VERSION = "2.5.0"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -327,6 +332,9 @@ class Tool:
     ai: bool = False          # part of `--profile ai`
     platforms: Tuple[str, ...] = ()   # limit a pkg to these OSes: "win", "mac", "linux"
     min_azd: str = ""         # azd extensions: minimum azd version
+    repo: str = ""            # GitHub "owner/name" that publishes release notes
+    tag_re: str = ""          # only releases whose tag matches (for repos that mix several products)
+    notes_url: str = ""       # markdown release-notes page with "## <date>\\n\\nVersion x.y.z" sections
 
     @property
     def short(self):
@@ -335,33 +343,33 @@ class Tool:
 
 CATALOG: List[Tool] = [
     Tool("az", "Azure CLI", "CLI", "pkg", "az command line", True,
-         brew="azure-cli", winget="Microsoft.AzureCLI", cmd="az"),
+         brew="azure-cli", winget="Microsoft.AzureCLI", cmd="az", repo="Azure/azure-cli", tag_re=r"^azure-cli-\d", notes_url="https://raw.githubusercontent.com/MicrosoftDocs/azure-docs-cli/main/docs-ref-conceptual/Latest-version/release-notes-azure-cli.md"),
     Tool("azd", "Azure Developer CLI", "CLI", "pkg", "azd up / templates", True,
-         brew="azd", winget="Microsoft.Azd", cmd="azd", vcmd=("azd", "version")),
-    Tool("bicep", "Bicep", "CLI", "bicep", "IaC language (via az bicep)", True),
+         brew="azd", winget="Microsoft.Azd", cmd="azd", vcmd=("azd", "version"), repo="Azure/azure-dev", tag_re=r"^azure-dev-cli_"),
+    Tool("bicep", "Bicep", "CLI", "bicep", "IaC language (via az bicep)", True, repo="Azure/bicep"),
     Tool("func", "Functions Core Tools", "CLI", "pkg", "local Azure Functions",
          brew="azure/functions/azure-functions-core-tools@4",
-         winget="Microsoft.Azure.FunctionsCoreTools", cmd="func"),
+         winget="Microsoft.Azure.FunctionsCoreTools", cmd="func", repo="Azure/azure-functions-core-tools"),
     Tool("kubelogin", "kubelogin", "CLI", "pkg", "Entra auth for AKS",
-         brew="azure/kubelogin/kubelogin", winget="Azure.Kubelogin", cmd="kubelogin"),
+         brew="azure/kubelogin/kubelogin", winget="Azure.Kubelogin", cmd="kubelogin", repo="Azure/kubelogin"),
     Tool("kubectl", "kubectl", "CLI", "pkg", "Kubernetes CLI",
          brew="kubernetes-cli", winget="Kubernetes.kubectl", cmd="kubectl",
-         vcmd=("kubectl", "version", "--client")),
+         vcmd=("kubectl", "version", "--client"), repo="kubernetes/kubernetes"),
     Tool("azcopy", "AzCopy", "CLI", "pkg", "fast blob/file transfer",
-         brew="azcopy", winget="Microsoft.Azure.AZCopy.10", cmd="azcopy"),
+         brew="azcopy", winget="Microsoft.Azure.AZCopy.10", cmd="azcopy", repo="Azure/azure-storage-azcopy"),
     Tool("sqlcmd", "sqlcmd (go)", "CLI", "pkg", "Azure SQL shell",
-         brew="sqlcmd", winget="Microsoft.Sqlcmd", cmd="sqlcmd"),
+         brew="sqlcmd", winget="Microsoft.Sqlcmd", cmd="sqlcmd", repo="microsoft/go-sqlcmd"),
     Tool("terraform", "Terraform", "CLI", "pkg", "IaC (azurerm)",
-         brew="hashicorp/tap/terraform", winget="Hashicorp.Terraform", cmd="terraform"),
+         brew="hashicorp/tap/terraform", winget="Hashicorp.Terraform", cmd="terraform", repo="hashicorp/terraform"),
     Tool("pwsh", "PowerShell 7", "PowerShell", "pkg", "needed for the modules below", True,
-         cask="powershell", winget="Microsoft.PowerShell", ghtar="PowerShell/PowerShell", cmd="pwsh"),
-    Tool("Az", "Az PowerShell", "PowerShell", "psmod", "Azure PowerShell module", True, pkg="Az"),
+         cask="powershell", winget="Microsoft.PowerShell", ghtar="PowerShell/PowerShell", cmd="pwsh", repo="PowerShell/PowerShell"),
+    Tool("Az", "Az PowerShell", "PowerShell", "psmod", "Azure PowerShell module", True, pkg="Az", repo="Azure/azure-powershell"),
     Tool("Microsoft.Graph", "Microsoft Graph SDK", "PowerShell", "psmod", "Graph API v1.0 cmdlets",
-         True, pkg="Microsoft.Graph"),
+         True, pkg="Microsoft.Graph", repo="microsoftgraph/msgraph-sdk-powershell"),
     Tool("Microsoft.Graph.Beta", "Microsoft Graph Beta", "PowerShell", "psmod",
-         "Graph API beta cmdlets", pkg="Microsoft.Graph.Beta"),
+         "Graph API beta cmdlets", pkg="Microsoft.Graph.Beta", repo="microsoftgraph/msgraph-sdk-powershell"),
     Tool("Microsoft.Entra", "Microsoft Entra PS", "PowerShell", "psmod", "Entra ID admin cmdlets",
-         pkg="Microsoft.Entra"),
+         pkg="Microsoft.Entra", repo="microsoftgraph/entra-powershell"),
     Tool("ext-graph", "ext: resource-graph", "az extensions", "azext",
          "Azure Resource Graph queries", True, pkg="resource-graph"),
     Tool("ext-devops", "ext: azure-devops", "az extensions", "azext", "Azure DevOps from az",
@@ -371,11 +379,11 @@ CATALOG: List[Tool] = [
     # ── Microsoft Foundry / AI ──
     Tool("foundry-local", "Foundry Local", "AI", "pkg", "run models on your machine (preview)",
          ai=True, brew="microsoft/foundrylocal/foundrylocal", winget="Microsoft.FoundryLocal",
-         cmd="foundry", platforms=("win", "mac")),
+         cmd="foundry", platforms=("win", "mac"), repo="microsoft/Foundry-Local"),
     Tool("azd-foundry", "azd: Microsoft Foundry", "AI", "azdext", "Foundry bundle for azd (agents, models…)",
-         ai=True, pkg="microsoft.foundry", min_azd="1.37.0"),
+         ai=True, pkg="microsoft.foundry", min_azd="1.37.0", repo="Azure/azure-dev", tag_re=r"^azd-ext-microsoft-foundry_"),
     Tool("azd-agents", "azd: AI agents", "AI", "azdext", "scaffold / deploy hosted agents",
-         pkg="azure.ai.agents", min_azd="1.25.0"),
+         pkg="azure.ai.agents", min_azd="1.25.0", repo="Azure/azure-dev", tag_re=r"^azd-ext-azure-ai-agents_"),
     Tool("ext-ml", "ext: ml (Azure ML)", "AI", "azext", "Azure ML v2 + Foundry hubs for az",
          ai=True, pkg="ml"),
 ]
@@ -401,7 +409,11 @@ def spec(t: Tool) -> Optional[Tuple[str, str]]:
 
 
 TOOLS = [t for t in CATALOG if t.kind != "pkg" or spec(t)]
-BY_KEY = {t.key.lower(): t for t in TOOLS}
+BY_KEY = {}
+for _t in TOOLS:
+    BY_KEY.setdefault(_t.key.lower(), _t)       # case-insensitive; first in the catalog wins ("az" = Azure CLI)
+ALIASES = {"azps": "Az", "az-ps": "Az", "az-powershell": "Az", "azure-cli": "az", "azcli": "az",
+           "graph": "Microsoft.Graph", "entra": "Microsoft.Entra", "functions": "func"}
 HOST_NAME = {"brew": "Homebrew", "cask": "Homebrew", "winget": "winget", "snap": "snap"}
 
 
@@ -525,8 +537,11 @@ def linux_arch():
 
 
 def gh_json(url):
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
-                                               "User-Agent": "azup"})
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "azup"}
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if tok and url.startswith("https://api.github.com/"):
+        headers["Authorization"] = f"Bearer {tok}"        # only ever sent to api.github.com
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=25) as r:
         return json.load(r)
 
@@ -807,6 +822,158 @@ def print_table(st):
           f"{dim(str(len(st) - n_in))} not installed\n")
 
 
+# ───────────────────────────── what's new ─────────────────────────────
+def ver_of(tag):
+    m = re.search(r"\d+\.\d+(?:\.\d+)*", tag or "")
+    return m.group(0) if m else ""
+
+
+def notes_from_github(t, cur, new):
+    rels = gh_json(f"https://api.github.com/repos/{t.repo}/releases?per_page=60")
+    keep = []
+    for r in rels:
+        if r.get("draft") or r.get("prerelease"):
+            continue
+        if t.tag_re and not re.search(t.tag_re, r["tag_name"]):
+            continue
+        v = ver_of(r["tag_name"])
+        if not v or vtuple(v) <= vtuple(cur) or (new and vtuple(v) > vtuple(new)):
+            continue
+        keep.append((vtuple(v), v, r))
+    keep.sort(key=lambda x: x[0], reverse=True)
+    return {"items": [{"version": v, "date": (r.get("published_at") or "")[:10],
+                       "body": r.get("body") or "", "url": r["html_url"]} for _, v, r in keep],
+            "page": f"https://github.com/{t.repo}/releases"}
+
+
+def notes_from_history(t, cur, new):
+    """az extensions keep a HISTORY.rst per extension in Azure/azure-cli-extensions."""
+    base = f"Azure/azure-cli-extensions/main/src/{t.pkg}/HISTORY.rst"
+    req = urllib.request.Request("https://raw.githubusercontent.com/" + base, headers={"User-Agent": "azup"})
+    text = urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "replace")
+    parts = re.split(r"^(\d+\.\d+\.\d+\S*)\n[+~=\-]{3,}[ \t]*$", text, flags=re.M)
+    items = []
+    for i in range(1, len(parts) - 1, 2):
+        v = parts[i]
+        if vtuple(v) > vtuple(cur) and (not new or vtuple(v) <= vtuple(new)):
+            items.append({"version": v, "date": "", "body": parts[i + 1].strip(),
+                          "url": f"https://github.com/Azure/azure-cli-extensions/blob/main/src/{t.pkg}/HISTORY.rst"})
+    return {"items": items, "page": f"https://github.com/Azure/azure-cli-extensions/blob/main/src/{t.pkg}/HISTORY.rst"}
+
+
+def notes_from_markdown(t, cur, new):
+    req = urllib.request.Request(t.notes_url, headers={"User-Agent": "azup"})
+    text = urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "replace")
+    parts = re.split(r"^## ([^\n]+)\n+Version (\d+(?:\.\d+)*)[^\n]*\n", text, flags=re.M)
+    items = []
+    for i in range(1, len(parts) - 2, 3):
+        date, v, body = parts[i], parts[i + 1], parts[i + 2]
+        if vtuple(v) > vtuple(cur) and (not new or vtuple(v) <= vtuple(new)):
+            items.append((vtuple(v), {"version": v, "date": date, "body": body.strip(),
+                                      "url": "https://learn.microsoft.com/cli/azure/release-notes-azure-cli"}))
+    items.sort(key=lambda x: x[0], reverse=True)
+    return {"items": [x[1] for x in items], "page": "https://learn.microsoft.com/cli/azure/release-notes-azure-cli"}
+
+
+def fetch_notes(t, cur, new):
+    """Release notes for versions newer than `cur` (up to `new`). Never raises."""
+    try:
+        if t.kind == "azext":
+            return notes_from_history(t, cur, new)
+        if t.notes_url:
+            return notes_from_markdown(t, cur, new)
+        if not t.repo:
+            return {"error": "no release-notes source known for this tool"}
+        return notes_from_github(t, cur, new)
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            return {"error": "GitHub rate limit reached – set GITHUB_TOKEN to raise it"}
+        return {"error": f"HTTP {e.code}"}
+    except Exception as e:
+        return {"error": f"couldn't fetch release notes ({e.__class__.__name__}) – offline?"}
+
+
+SKIP_HEADINGS = re.compile(r"docker|install|download|checksum|asset|release notes?$", re.I)
+SKIP_LINES = re.compile(r"^\s*(gallery module|to install|to update from|full changelog)", re.I)
+
+
+def render_notes(body, width, max_lines):
+    body = re.sub(r"```.*?```", "", body, flags=re.S)                 # install snippets etc.
+    out, skipping = [], False
+    for raw in body.splitlines():
+        l = re.sub(r"<!--.*?-->|<[^>]+>|!\[[^\]]*\]\([^)]*\)", "", raw).rstrip()
+        l = re.sub(r"\[(\[[^\]]+\])\]\([^)]*\)", r"\1", l)        # [[#123]](url) -> [#123]
+        l = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", l)              # [text](url)  -> text
+        l = re.sub(r"\[(#\d+)\]", r"\1", l).replace("**", "").replace("`", "")
+        if not l.strip():
+            continue
+        head = re.match(r"^\s*#{1,6}\s*(.*)", l)
+        if head:
+            skipping = bool(SKIP_HEADINGS.search(head.group(1).strip()))
+            if skipping:
+                continue
+        elif skipping or SKIP_LINES.match(l):
+            continue
+        bullet = re.match(r"^\s*[-*+]\s+(.*)", l)
+        if head:
+            out.append(bold(head.group(1).strip()))
+        else:
+            txt = bullet.group(1) if bullet else l.strip()
+            for k, w in enumerate(textwrap.wrap(txt, max(30, width - 6)) or [""]):
+                out.append(("• " if bullet and k == 0 else "  " if bullet else "") + w)
+    more = max(0, len(out) - max_lines)
+    return out[:max_lines], more
+
+
+def print_changes(tools, st, per_tool=4, lines=12, latest_only=False):
+    """Print what's new for each tool, between the installed and the latest version."""
+    if not tools:
+        return
+    width = min(shutil.get_terminal_size((100, 24)).columns, 110) - 4
+    with Spinner("reading release notes…"):
+        with cf.ThreadPoolExecutor(6) as ex:
+            futs = {t.key: ex.submit(fetch_notes, t, "0" if latest_only else st[t.key].version,
+                                     "" if latest_only else st[t.key].latest) for t in tools}
+            res = {k: f.result() for k, f in futs.items()}
+    for t in tools:
+        s, r = st[t.key], res[t.key]
+        move = f"{s.version} → {s.latest}" if s.outdated else (s.version or "")
+        print(f"\n  {azure('▶')} {bold(t.name)}  {yellow(move) if s.outdated else dim(move)}")
+        if r.get("error") or not r.get("items"):
+            print(f"    {dim(r.get('error') or 'no release notes found')}"
+                  + (f"  {dim(r['page'])}" if r.get("page") else ""))
+            continue
+        items = r["items"][:1] if latest_only else r["items"]
+        for it in items[:per_tool]:
+            print(f"    {bold(green('v' + it['version']))} {dim(it['date'])}")
+            body, more = render_notes(it["body"], width, lines)
+            for l in body:
+                print("      " + l)
+            if more:
+                print(dim(f"      … +{more} more lines  {it['url']}"))
+        left = len(items) - per_tool
+        if left > 0:
+            print(dim(f"    … and {left} older release{'s' if left != 1 else ''}: {r['page']}"))
+    print()
+
+
+def proceed(actions, st, yes=False):
+    """'Proceed?' that also offers 'c' = see what's new for the updates in the plan."""
+    if yes:
+        return True
+    if not (TTY and sys.stdin.isatty()):
+        return False
+    ups = [t for t, v in actions if v == "update"]
+    while True:
+        a = input(f"  Proceed? {dim('[Y/n/c]  c = see what' + chr(39) + 's new first') if ups else dim('[Y/n]')} ").strip().lower()
+        if a in ("", "y", "yes"):
+            return True
+        if a in ("n", "no"):
+            return False
+        if a == "c" and ups:
+            print_changes(ups, st)
+
+
 # ───────────────────────────── execution ─────────────────────────────
 def build_cmd(t: Tool, verb: str):
     inst = verb == "install"
@@ -949,7 +1116,7 @@ def stream(cmd, dry):
     if dry:
         return True
     try:
-        if cmd[0] == "brew":
+        if cmd[0] == "brew" or SCHEDULED:
             rc, out = run_tee(cmd)
             if rc != 0 and "untrusted tap" in out and trust_tap(out):
                 rc, out = run_tee(cmd)        # retry once after trusting
@@ -1055,9 +1222,14 @@ def execute(actions: List[Action], dry=False, yes=False):
         print(f"   {green('✔') if ok else red('✘')} {pad(t.name, 24)}{pad(dim(verb), 10)}"
               f"{dim(f'{dt:4.0f}s')}  {red(note) if note else ''}")
     bad = [r for r in results if not r[2]]
+    LAST_RESULTS[:] = results
+    if not dry:
+        cache_forget({r[0].key for r in results if r[2]})
     print(f"\n  {progress(len(results) - len(bad), len(results))} "
           f"{dim(f'{len(results) - len(bad)}/{len(results)}')}\n")
-    if not dry:
+    if SCHEDULED:
+        print(f"{len(results) - len(bad)} ok, {len(bad)} failed")
+    elif not dry:
         if bad:
             say(random.choice(OOPS), "sad")
             print(f"\n  {red(str(len(bad)))} failed – scroll up for the error output.\n")
@@ -1102,6 +1274,7 @@ def pick(title, rows: List[Row], multi=False, preselect=(), extra: Optional[Dict
     sel = set(preselect)
     n = len(rows)
     sel_idx = [i for i, r in enumerate(rows) if not r[2]]
+    lw = min(36, max([24] + [plain_len(r[0]) + 2 for r in rows if not r[2]]))     # label column width
     cur = start if start in sel_idx else sel_idx[0]
     extra = extra or {}
     keys = ["space toggle", "a all", "n none"] if multi else []
@@ -1118,7 +1291,7 @@ def pick(title, rows: List[Row], multi=False, preselect=(), extra: Optional[Dict
                 continue
             ptr = azure("❯") if i == cur else " "
             box = (green("◉ ") if i in sel else dim("○ ")) if multi else ""
-            out.append(f"\x1b[K   {ptr} {box}{pad(bold(lab) if i == cur else lab, 24)} {hint}")
+            out.append(f"\x1b[K   {ptr} {box}{pad(bold(lab) if i == cur else lab, lw)} {hint}")
         out.append(f"\x1b[K  {dim(help_)}")
         sys.stdout.write("\n".join(out) + "\n")
         sys.stdout.flush()
@@ -1166,7 +1339,10 @@ def load(check=True):
 def resolve(names):
     out = []
     for n in names:
-        t = BY_KEY.get(n.lower()) or next((x for x in TOOLS if x.name.lower() == n.lower()), None)
+        t = (next((x for x in TOOLS if n in (x.key, x.pkg)), None)              # exact case: az vs Az
+             or (next((x for x in TOOLS if x.key == ALIASES[n.lower()]), None) if n.lower() in ALIASES else None)
+             or BY_KEY.get(n.lower())
+             or next((x for x in TOOLS if x.name.lower() == n.lower()), None))
         if not t:
             sys.exit(red(f"  unknown tool '{n}'. Known: ") + ", ".join(x.key for x in TOOLS))
         out.append(t)
@@ -1229,7 +1405,7 @@ def select_flow(st=None, dry=False, yes=False):
         print()
         return True
     print()
-    if not confirm("Proceed?", yes):
+    if not proceed(actions, st, yes):
         print("  cancelled.\n")
         return True
     return execute(actions, dry, yes)
@@ -1260,13 +1436,40 @@ def cmd_install(a):
 
 
 def cmd_update(a):
+    if getattr(a, "scheduled", False):
+        return scheduled_update(a)
     st = load(True)
     tools = [t for t in resolve(a.names) if st[t.key].installed] if a.names \
         else [t for t in TOOLS if st[t.key].outdated]
     ext = [t.name for t in tools if not st[t.key].managed]
     if ext:
         print(yellow("  skipping (not managed by azup): " + ", ".join(ext)))
-    return 0 if execute([(t, "update") for t in tools if st[t.key].managed], a.dry_run, a.yes) else 1
+    acts = [(t, "update") for t in tools if st[t.key].managed]
+    if getattr(a, "changes", False) and acts:
+        print_changes([t for t, _ in acts], st)
+        if not proceed([], st, a.yes):
+            print("  cancelled.\n")
+            return 0
+    return 0 if execute(acts, a.dry_run, a.yes) else 1
+
+
+def cmd_changes(a):
+    st = load(True)
+    if a.names:
+        tools = [t for t in resolve(a.names) if st[t.key].installed]
+        quiet = [t for t in tools if not st[t.key].outdated]
+        tools = [t for t in tools if st[t.key].outdated]
+    else:
+        tools = [t for t in TOOLS if st[t.key].outdated]
+        quiet = []
+    if not tools and not quiet:
+        print(f"  {green('✔')} nothing is outdated – nothing new to read.\n")
+        return 0
+    print_changes(tools, st)
+    if quiet:
+        print(dim("  already on the latest version – showing the most recent release:"))
+        print_changes(quiet, st, latest_only=True)
+    return 0
 
 
 def cmd_login(a):
@@ -1574,6 +1777,481 @@ def cmd_self_update(a):
     return 0
 
 
+# ───────────────────────────── nudge & scheduled updates ─────────────────────────────
+AZUP_DIR = os.path.expanduser("~/.azup")
+SCHEDULED = False                 # True while `azup update --scheduled` runs unattended
+LAST_RESULTS: list = []           # (tool, verb, ok, seconds, note) of the last execute()
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+SCHED_LABEL, TASK_NAME = "io.github.azup.update", "azup-update"
+
+
+def _p(*parts):
+    return os.path.join(AZUP_DIR, *parts)
+
+
+def jload(name, default=None):
+    try:
+        with open(_p(name), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def jsave(name, obj):
+    try:
+        os.makedirs(AZUP_DIR, exist_ok=True)
+        tmp = _p(name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=1)
+        os.replace(tmp, _p(name))
+    except OSError:
+        pass
+
+
+def cfg_get():
+    return jload("config.json") or {}
+
+
+def cfg_set(section, **kw):
+    c = cfg_get()
+    c.setdefault(section, {}).update(kw)
+    jsave("config.json", c)
+
+
+def parse_dur(txt):
+    m = re.fullmatch(r"(\d+)\s*([hdw])", (txt or "").strip().lower())
+    return int(m.group(1)) * {"h": 3600, "d": 86400, "w": 604800}[m.group(2)] if m else None
+
+
+def ago(ts):
+    d = max(0, time.time() - ts)
+    return "just now" if d < 90 else f"{int(d // 60)}m ago" if d < 5400 else \
+        f"{int(d // 3600)}h ago" if d < 172800 else f"{int(d // 86400)}d ago"
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, x):
+        for s in self.streams:
+            s.write(x)
+        return len(x)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+    def isatty(self):
+        return False
+
+    def reconfigure(self, **kw):
+        pass
+
+
+# ── cache of "what is outdated", refreshed in the background ──
+def cache_write(st):
+    out = [{"key": t.key, "name": t.name, "version": st[t.key].version, "latest": st[t.key].latest}
+           for t in TOOLS if st[t.key].outdated and st[t.key].managed]
+    jsave("state.json", {"checked": time.time(), "refreshing": 0, "outdated": out})
+
+
+def cache_forget(keys):
+    s = jload("state.json")
+    if s and keys:
+        s["outdated"] = [o for o in s.get("outdated", []) if o["key"] not in keys]
+        jsave("state.json", s)
+
+
+def spawn_refresh():
+    s = jload("state.json") or {}
+    if time.time() - s.get("refreshing", 0) < 600:            # one refresh at a time
+        return
+    s["refreshing"] = time.time()
+    jsave("state.json", s)
+    kw = {"creationflags": 0x00000008 | 0x08000000} if IS_WIN else {"start_new_session": True}
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "nudge", "refresh"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True, **kw)
+    except OSError:
+        pass
+
+
+def nudge_show():
+    """Called from your shell profile: at most one short line, from the cache. Never slow, never noisy."""
+    if not TTY:
+        return
+    now = time.time()
+    cfg = cfg_get().get("nudge", {})
+    st = jload("state.json") or {}
+    if now - st.get("checked", 0) > 12 * 3600:
+        spawn_refresh()
+    lr = jload("last-run.json")
+    if lr and not lr.get("seen") and (lr.get("updated") or lr.get("failed")):
+        bits = []
+        if lr.get("updated"):
+            bits.append(green(f"updated {len(lr['updated'])}") + dim(f" ({', '.join(lr['updated'][:3])}"
+                        + (f" +{len(lr['updated']) - 3}" if len(lr["updated"]) > 3 else "") + ")"))
+        if lr.get("failed"):
+            bits.append(red(f"{len(lr['failed'])} failed") + dim(f" ({', '.join(lr['failed'][:3])})"))
+        print(f"  {azure('▟▙')} {bold('azup')} auto-update {ago(lr.get('at', now))}: " + " · ".join(bits)
+              + dim(f"  log: {lr.get('log', '')}"))
+        lr["seen"] = True
+        jsave("last-run.json", lr)
+    out = st.get("outdated") or []
+    if out and now >= cfg.get("snooze_until", 0) and now - cfg.get("last_shown", 0) >= cfg.get("every_h", 24) * 3600:
+        names = [o["name"] for o in out]
+        shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+        print(f"  {azure('▟▙')} {bold('azup')} {yellow(f'{len(out)} tool' + ('s' if len(out) != 1 else '') + ' outdated')} "
+              f"{dim('(' + shown + ')')} → {bold('azup update')} {dim('· azup changes · azup nudge snooze 7d')}")
+        cfg["last_shown"] = now
+        cfg_set("nudge", **cfg)
+
+
+# ── shell hooks (a clearly marked block you can remove with `azup nudge disable`) ──
+NUDGE_START, NUDGE_END = "# >>> azup nudge >>>", "# <<< azup nudge <<<"
+SH_BODY = "command -v azup >/dev/null 2>&1 && azup nudge"
+PS_BODY = "if (Get-Command azup -ErrorAction SilentlyContinue) { azup nudge }"
+
+
+def ps_profile_paths():
+    out = []
+    for exe in (("pwsh", "powershell") if IS_WIN else ("pwsh",)):
+        if have(exe):
+            rc, o = run([exe, "-NoProfile", "-Command", "$PROFILE.CurrentUserCurrentHost"], 30)
+            if rc == 0 and o.strip():
+                out.append((exe, o.strip().splitlines()[-1]))
+    return out
+
+
+def shell_targets(which=None):
+    t = []
+    sh = "" if IS_WIN else os.path.basename(os.environ.get("SHELL", ""))
+    if which == "zsh" or (which is None and sh == "zsh"):
+        t.append(("zsh", os.path.expanduser("~/.zshrc"), SH_BODY))
+    if which == "bash" or (which is None and sh == "bash"):
+        t.append(("bash", os.path.expanduser("~/.bash_profile" if IS_MAC else "~/.bashrc"), SH_BODY))
+    if which in (None, "pwsh"):
+        t += [(exe, path, PS_BODY) for exe, path in ps_profile_paths()]
+    return t
+
+
+def add_block(path, body):
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        text = ""
+    if NUDGE_START in text:
+        return False
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(("\n" if text and not text.endswith("\n") else "") + f"{NUDGE_START}\n{body}\n{NUDGE_END}\n")
+    return True
+
+
+def remove_block(path):
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return False
+    new = re.sub(rf"\n?{re.escape(NUDGE_START)}.*?{re.escape(NUDGE_END)}\n?", "\n", text, flags=re.S)
+    if new == text:
+        return False
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(new)
+    return True
+
+
+def nudge_enable(a):
+    targets = shell_targets(getattr(a, "shell", None))
+    if not targets:
+        print(yellow("  couldn't tell which shell you use. Pick one:  azup nudge enable --shell zsh|bash|pwsh"))
+        return 1
+    print(f"\n  {bold('Terminal nudge')} – when you open a terminal azup prints one short line if tools are\n"
+          f"  outdated (at most once a day). It reads a small cache that a background job refreshes with the\n"
+          f"  same package-manager lookups as `azup status`. Nothing is installed or changed automatically.\n")
+    for label, path, body in targets:
+        print(f"   {azure('•')} {label}: {path}")
+    print()
+    if not confirm("Add the one-line hook to these files?", getattr(a, "yes", False)):
+        print("  cancelled.\n")
+        return 0
+    for label, path, body in targets:
+        print(f"   {green('✔') if add_block(path, body) else dim('·')} {label}")
+    cfg_set("nudge", enabled=True)
+    spawn_refresh()
+    print(f"\n  Done. Open a new terminal. Remove it anytime with {bold('azup nudge disable')}.\n")
+    return 0
+
+
+def nudge_disable(a):
+    paths = {os.path.expanduser(p) for p in ("~/.zshrc", "~/.bashrc", "~/.bash_profile", "~/.profile")}
+    paths |= {path for _, path in ps_profile_paths()}
+    gone = [p for p in sorted(paths) if remove_block(p)]
+    cfg_set("nudge", enabled=False)
+    for p in gone:
+        print(f"   {green('✔')} removed from {p}")
+    print(f"  {green('✔')} nudge is off.\n")
+    return 0
+
+
+def nudge_status(a):
+    cfg, st = cfg_get().get("nudge", {}), jload("state.json") or {}
+    hooked = [p for _, p, _ in shell_targets() if NUDGE_START in (open(p, encoding="utf-8").read() if os.path.exists(p) else "")]
+    print(f"\n  {bold('Terminal nudge')}: {green('on') if cfg.get('enabled') else dim('off')}"
+          + (f"  {dim('in ' + ', '.join(hooked))}" if hooked else ""))
+    if st.get("checked"):
+        n = len(st.get("outdated") or [])
+        print(f"  last check: {ago(st['checked'])} · {n} outdated")
+    else:
+        print(dim("  no check yet (a background refresh runs when you open a terminal)"))
+    if cfg.get("snooze_until", 0) > time.time():
+        print(f"  snoozed for another {int((cfg['snooze_until'] - time.time()) // 3600)}h")
+    print()
+    return 0
+
+
+def cmd_nudge(a):
+    act = a.action
+    try:
+        if act == "show":
+            nudge_show()
+        elif act == "refresh":
+            cache_write(detect(True))
+        elif act == "enable":
+            return nudge_enable(a)
+        elif act == "disable":
+            return nudge_disable(a)
+        elif act == "status":
+            return nudge_status(a)
+        elif act == "snooze":
+            secs = parse_dur(a.arg or "7d")
+            if not secs:
+                print(red("  use a duration like 12h, 7d or 2w"))
+                return 1
+            cfg_set("nudge", snooze_until=time.time() + secs)
+            print(f"  {green('✔')} quiet for {a.arg or '7d'}")
+    except Exception:
+        if act != "show":
+            raise
+    return 0
+
+
+# ── scheduled updates: launchd (macOS) · systemd or cron (Linux) · Task Scheduler (Windows) ──
+def sched_cmd():
+    py = sys.executable
+    if IS_WIN:
+        pw = os.path.join(os.path.dirname(py), "pythonw.exe")           # no console window flashing
+        py = pw if os.path.exists(pw) else py
+    return [py, os.path.abspath(__file__), "update", "--scheduled"]
+
+
+def sched_path_env():
+    return ":".join(["/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin",
+                     os.path.expanduser("~/.local/bin"), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+
+
+def parse_at(txt):
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", txt or "")
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        raise ValueError("use --at HH:MM (24h), e.g. 09:00")
+    return int(m.group(1)), int(m.group(2))
+
+
+def launchd_plist(cmd, freq, day, hh, mm):
+    cal = {"Hour": hh, "Minute": mm}
+    if freq == "weekly":
+        cal["Weekday"] = (DAYS.index(day) + 1) % 7                      # launchd: Sunday = 0
+    return plistlib.dumps({"Label": SCHED_LABEL, "ProgramArguments": cmd, "StartCalendarInterval": cal,
+                           "EnvironmentVariables": {"PATH": sched_path_env()},
+                           "StandardOutPath": _p("logs", "launchd.log"), "StandardErrorPath": _p("logs", "launchd.log"),
+                           "RunAtLoad": False, "ProcessType": "Background"}).decode()
+
+
+def systemd_units(cmd, freq, day, hh, mm):
+    service = ("[Unit]\nDescription=azup: update the Azure toolbox\n\n[Service]\nType=oneshot\n"
+               f"Environment=PATH={sched_path_env()}\nExecStart={shlex.join(cmd)}\n")
+    cal = (f"{day.capitalize()} " if freq == "weekly" else "") + f"*-*-* {hh:02d}:{mm:02d}:00"
+    timer = (f"[Unit]\nDescription=azup scheduled update ({freq})\n\n[Timer]\nOnCalendar={cal}\n"
+             "Persistent=true\n\n[Install]\nWantedBy=timers.target\n")
+    return service, timer
+
+
+def cron_line(cmd, freq, day, hh, mm):
+    dow = str((DAYS.index(day) + 1) % 7) if freq == "weekly" else "*"
+    log = _p("logs", "cron.log")
+    return (f"{mm} {hh} * * {dow} PATH={shlex.quote(sched_path_env())} {shlex.join(cmd)} "
+            f">> {shlex.quote(log)} 2>&1  # {TASK_NAME}")
+
+
+def schtasks_create(cmd, freq, day, hh, mm):
+    args = ["schtasks", "/Create", "/TN", TASK_NAME, "/SC", "WEEKLY" if freq == "weekly" else "DAILY",
+            "/ST", f"{hh:02d}:{mm:02d}", "/TR", subprocess.list2cmdline(cmd), "/F"]
+    if freq == "weekly":
+        args[6:6] = ["/D", day.upper()]
+    return args
+
+
+def systemd_ok():
+    return have("systemctl") and run(["systemctl", "--user", "show-environment"], 15)[0] == 0
+
+
+def sched_enable(freq, day, at, dry):
+    hh, mm = parse_at(at)
+    cmd = sched_cmd()
+    os.makedirs(_p("logs"), exist_ok=True)
+
+    def show(title, text):
+        print(f"\n  {dim(title)}\n" + "\n".join("    " + l for l in text.rstrip().splitlines()))
+
+    if IS_MAC:
+        path = os.path.expanduser(f"~/Library/LaunchAgents/{SCHED_LABEL}.plist")
+        text = launchd_plist(cmd, freq, day, hh, mm)
+        if dry:
+            show(f"would write {path}", text)
+            return True
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        dom = f"gui/{os.getuid()}"
+        run(["launchctl", "bootout", f"{dom}/{SCHED_LABEL}"], 20)
+        return run(["launchctl", "bootstrap", dom, path], 20)[0] == 0
+    if IS_WIN:
+        args = schtasks_create(cmd, freq, day, hh, mm)
+        if dry:
+            show("would run", " ".join(args))
+            return True
+        return run(args, 30)[0] == 0
+    if systemd_ok():
+        svc, tmr = systemd_units(cmd, freq, day, hh, mm)
+        d = os.path.expanduser("~/.config/systemd/user")
+        if dry:
+            show(f"would write {d}/azup-update.service", svc)
+            show(f"would write {d}/azup-update.timer", tmr)
+            return True
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "azup-update.service"), "w").write(svc)
+        open(os.path.join(d, "azup-update.timer"), "w").write(tmr)
+        run(["systemctl", "--user", "daemon-reload"], 20)
+        return run(["systemctl", "--user", "enable", "--now", "azup-update.timer"], 20)[0] == 0
+    if have("crontab"):
+        line = cron_line(cmd, freq, day, hh, mm)
+        if dry:
+            show("would add to your crontab", line)
+            return True
+        rc, cur = run(["crontab", "-l"], 15)
+        keep = [l for l in (cur.splitlines() if rc == 0 else []) if TASK_NAME not in l]
+        p = subprocess.run(["crontab", "-"], input="\n".join(keep + [line]) + "\n", text=True)
+        return p.returncode == 0
+    print(red("  neither systemd (user) nor cron is available on this machine."))
+    return False
+
+
+def sched_disable():
+    if IS_MAC:
+        path = os.path.expanduser(f"~/Library/LaunchAgents/{SCHED_LABEL}.plist")
+        run(["launchctl", "bootout", f"gui/{os.getuid()}/{SCHED_LABEL}"], 20)
+        if os.path.exists(path):
+            os.remove(path)
+        return True
+    if IS_WIN:
+        return run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], 30)[0] == 0
+    d = os.path.expanduser("~/.config/systemd/user")
+    if have("systemctl"):
+        run(["systemctl", "--user", "disable", "--now", "azup-update.timer"], 20)
+    for f in ("azup-update.service", "azup-update.timer"):
+        if os.path.exists(os.path.join(d, f)):
+            os.remove(os.path.join(d, f))
+    if have("crontab"):
+        rc, cur = run(["crontab", "-l"], 15)
+        if rc == 0 and TASK_NAME in cur:
+            subprocess.run(["crontab", "-"], input="\n".join(l for l in cur.splitlines() if TASK_NAME not in l) + "\n", text=True)
+    return True
+
+
+def sched_active():
+    if IS_MAC:
+        return run(["launchctl", "print", f"gui/{os.getuid()}/{SCHED_LABEL}"], 20)[0] == 0
+    if IS_WIN:
+        return run(["schtasks", "/Query", "/TN", TASK_NAME], 30)[0] == 0
+    if have("systemctl") and run(["systemctl", "--user", "is-enabled", "azup-update.timer"], 15)[0] == 0:
+        return True
+    return have("crontab") and TASK_NAME in run(["crontab", "-l"], 15)[1]
+
+
+def cmd_schedule(a):
+    act = a.action
+    if act == "run":
+        return cmd_update(argparse.Namespace(names=[], dry_run=False, yes=True, changes=False, scheduled=True))
+    if act == "status":
+        on, cfg = sched_active(), cfg_get().get("schedule", {})
+        print(f"\n  {bold('Scheduled update')}: {green('on') if on else dim('off')}"
+              + (f"  {dim(cfg.get('freq', '') + ' ' + (cfg.get('day', '') if cfg.get('freq') == 'weekly' else '') + ' ' + cfg.get('at', ''))}" if on and cfg else ""))
+        lr = jload("last-run.json")
+        if lr:
+            print(f"  last run: {ago(lr['at'])} · {len(lr.get('updated', []))} updated, {len(lr.get('failed', []))} failed"
+                  + (f", {len(lr.get('skipped', []))} skipped" if lr.get("skipped") else "") + f"  {dim(lr.get('log', ''))}")
+        print()
+        return 0
+    if act == "disable":
+        sched_disable()
+        cfg_set("schedule", enabled=False)
+        print(f"  {green('✔')} scheduled update is off.\n")
+        return 0
+    freq = "daily" if a.daily else "weekly"
+    try:
+        ok = sched_enable(freq, a.day, a.at, a.dry_run)
+    except ValueError as e:
+        print(red(f"  {e}"))
+        return 1
+    if not ok:
+        print(red("  could not create the schedule."))
+        return 1
+    if a.dry_run:
+        print()
+        return 0
+    cfg_set("schedule", enabled=True, freq=freq, day=a.day, at=a.at)
+    print(f"\n  {green('✔')} azup will update your tools {freq}"
+          + (f" on {a.day.capitalize()}s" if freq == "weekly" else "") + f" at {a.at}.")
+    print(dim("    Unattended runs skip anything that needs a password (e.g. the macOS PowerShell cask) and write a log to "
+              + _p("logs") + ".\n    Turn it off with: azup schedule disable\n"))
+    return 0
+
+
+def scheduled_update(a):
+    """Unattended update: no prompts, no animation, skips anything that needs a password, logs to ~/.azup/logs."""
+    global SCHEDULED
+    SCHEDULED = True
+    os.makedirs(_p("logs"), exist_ok=True)
+    logp = _p("logs", time.strftime("update-%Y%m%d-%H%M%S.log"))
+    lf = open(logp, "w", encoding="utf-8")
+    sys.stdout = Tee(sys.__stdout__, lf)
+    print(f"azup {VERSION} scheduled update · {time.ctime()}")
+    st = detect(True)
+    due = [t for t in TOOLS if st[t.key].outdated and st[t.key].managed]
+    skipped = [t for t in due if t.kind == "pkg" and spec(t)[0] == "cask"]     # cask installers ask for a password
+    todo = [t for t in due if t not in skipped]
+    for t in skipped:
+        print(f"skipping {t.name}: needs a password – run `azup update {t.key}` yourself")
+    ok = execute([(t, "update") for t in todo], False, True) if todo else True
+    res = list(LAST_RESULTS)
+    jsave("last-run.json", {"at": time.time(), "log": logp, "seen": False,
+                            "updated": [r[0].name for r in res if r[2]],
+                            "failed": [r[0].name for r in res if not r[2]],
+                            "skipped": [t.name for t in skipped]})
+    lf.close()
+    sys.stdout = sys.__stdout__
+    logs = sorted(glob.glob(_p("logs", "update-*.log")))
+    for old in logs[:-10]:                                  # keep the last 10 logs
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    return 0 if ok else 1
+
+
+
 def clippy_says(st):
     """Context-aware suggestion (message, index of the menu row to preselect)."""
     n_out = sum(s.outdated for s in st.values())
@@ -1595,6 +2273,32 @@ def cmd_joke(a):
     return 0
 
 
+def notifications_menu():
+    while True:
+        cfg = cfg_get()
+        nudge_on, sc = cfg.get("nudge", {}).get("enabled"), cfg.get("schedule", {})
+        sc_on = sc.get("enabled") and sched_active()
+        rows = [("Terminal nudge", "ON – select to turn off" if nudge_on else "OFF – a one-line reminder when you open a terminal", False),
+                ("Scheduled auto-update", (f"ON – {sc.get('freq')} {sc.get('at')} – select to turn off" if sc_on
+                                           else "OFF – update automatically, weekly (Mon 09:00)"), False),
+                ("Back", "", False)]
+        c = pick("Notifications & auto-update", rows)
+        if c is None or c == 2:
+            return
+        ns = argparse.Namespace(shell=None, yes=False, action="", daily=False, day="mon", at="09:00", dry_run=False)
+        if c == 0:
+            (nudge_disable if nudge_on else nudge_enable)(ns)
+        else:
+            if sc_on:
+                ns.action = "disable"
+            else:
+                ns.action = "enable"
+                if not confirm("Update your tools automatically every Monday at 09:00?"):
+                    continue
+            cmd_schedule(ns)
+        pause()
+
+
 def interactive():
     st = load(True)
     first = True
@@ -1607,42 +2311,56 @@ def interactive():
         msg, start = clippy_says(st)
         say(msg)
         print()
-        rows = [("Select components…", "tick what to install or update", False),
-                ("Update everything", f"{n_out} outdated", False),
-                ("Install core profile", "az, azd, bicep, PowerShell, Az, Graph, resource-graph", False),
-                ("Doctor", "sign-in & health", False),
-                ("Who am I?", "account + subscription in every tool", False),
-                ("Switch subscription…", "az + azd + Az PowerShell together", False),
-                ("Sign in…", "az / azd / PowerShell / Graph", False),
-                ("Update azup", "get the latest version of this tool", False),
-                ("Refresh", "re-scan", False),
-                ("Quit", "", False)]
-        c = pick("What now?", rows, start=start)
-        if c is None or c == 9:
+        menu = [("select", "Select components…", "tick what to install or update"),
+                ("update", "Update everything", f"{n_out} outdated"),
+                ("whatsnew", "What's new?", "release notes for what's outdated"),
+                ("core", "Install core profile", "az, azd, bicep, PowerShell, Az, Graph, resource-graph"),
+                ("doctor", "Doctor", "sign-in & health"),
+                ("whoami", "Who am I?", "account + subscription in every tool"),
+                ("ctx", "Switch subscription…", "az + azd + Az PowerShell together"),
+                ("login", "Sign in…", "az / azd / PowerShell / Graph"),
+                ("notify", "Notifications & auto-update…", "terminal nudge, scheduled updates"),
+                ("selfupdate", "Update azup", "get the latest version of this tool"),
+                ("refresh", "Refresh", "re-scan"),
+                ("quit", "Quit", "")]
+        ids = [m[0] for m in menu]
+        c = pick("What now?", [(m[1], m[2], False) for m in menu], start=ids.index(["select", "update", "core"][start]))
+        act = ids[c] if c is not None else "quit"
+        if act == "quit":
             print()
             say("Bye! May all your deployments be green.")
             print()
             return 0
-        if c == 0:
+        if act == "select":
             select_flow(st)
-        elif c == 1:
-            execute([(t, "update") for t in TOOLS if st[t.key].outdated and st[t.key].managed])
-        elif c == 2:
+        elif act == "update":
+            acts = [(t, "update") for t in TOOLS if st[t.key].outdated and st[t.key].managed]
+            if acts and proceed(acts, st):
+                execute(acts)
+            elif not acts:
+                print(f"  {green('✔')} nothing to update.\n")
+        elif act == "whatsnew":
+            cmd_changes(argparse.Namespace(names=[]))
+        elif act == "core":
             execute([(t, "install") for t in TOOLS if t.core and not st[t.key].installed])
-        elif c == 3:
+        elif act == "doctor":
             cmd_doctor(None)
-        elif c == 4:
+        elif act == "whoami":
             cmd_whoami(None)
-        elif c == 5:
+        elif act == "ctx":
             cmd_ctx(argparse.Namespace(query=None, list=False))
-        elif c == 6:
+        elif act == "login":
             s = pick("Sign in", [("Azure CLI", "az login", False), ("Azure Developer CLI", "azd auth login", False),
                                  ("Az PowerShell", "Connect-AzAccount", False), ("Microsoft Graph", "Connect-MgGraph", False)])
             if s is not None:
                 cmd_login(argparse.Namespace(target=["az", "azd", "ps", "graph"][s]))
-        elif c == 7:
+        elif act == "notify":
+            notifications_menu()
+            st = load(True)
+            continue
+        elif act == "selfupdate":
             cmd_self_update(None)
-        if c != 8:
+        if act != "refresh":
             pause()
         st = load(True)
 
@@ -1672,8 +2390,27 @@ def main():
     i.set_defaults(fn=cmd_install)
     u = sub.add_parser("update", aliases=["up"], help="update tools (default: all outdated)")
     u.add_argument("names", nargs="*")
+    u.add_argument("--changes", action="store_true", help="show release notes first, then ask")
+    u.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
     flags(u)
     u.set_defaults(fn=cmd_update)
+    nd = sub.add_parser("nudge", help="one-line 'tools are outdated' reminder when you open a terminal")
+    nd.add_argument("action", nargs="?", default="show",
+                    choices=["show", "enable", "disable", "status", "snooze", "refresh"])
+    nd.add_argument("arg", nargs="?", help="snooze duration, e.g. 12h, 7d, 2w")
+    nd.add_argument("--shell", choices=["zsh", "bash", "pwsh"], help="which shell profile to edit")
+    nd.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    nd.set_defaults(fn=cmd_nudge)
+    sc = sub.add_parser("schedule", help="update automatically on a schedule")
+    sc.add_argument("action", choices=["enable", "disable", "status", "run"])
+    sc.add_argument("--daily", action="store_true", help="every day (default: weekly)")
+    sc.add_argument("--day", choices=DAYS, default="mon", help="weekday for weekly runs (default: mon)")
+    sc.add_argument("--at", default="09:00", help="time of day, 24h HH:MM (default 09:00)")
+    sc.add_argument("-n", "--dry-run", action="store_true", help="show what would be created, change nothing")
+    sc.set_defaults(fn=cmd_schedule)
+    ch = sub.add_parser("changes", aliases=["whatsnew"], help="release notes for what's outdated (or named tools)")
+    ch.add_argument("names", nargs="*")
+    ch.set_defaults(fn=cmd_changes)
     sub.add_parser("doctor", help="health & sign-in checks").set_defaults(fn=cmd_doctor)
     sub.add_parser("whoami", aliases=["who"], help="who am I signed in as, in every tool?").set_defaults(fn=cmd_whoami)
     cx = sub.add_parser("ctx", help="switch subscription in az, azd and Az PowerShell at once")
