@@ -9,6 +9,7 @@
     azup doctor           sign-in + health checks
     azup login [target]   az | azd | ps | graph | all
     azup self-update      update azup itself
+    azup joke             Azzy tells a joke (animations: --no-anim or AZUP_NO_ANIM=1 to disable)
 
 Backends: Homebrew (macOS / Linux), winget (Windows), snap (PowerShell on Linux),
 PowerShellGet (PowerShell modules) and `az extension` / `az bicep`.
@@ -18,11 +19,13 @@ import argparse
 import concurrent.futures as cf
 import json
 import os
+import random
 import re
 import select
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.request
@@ -39,7 +42,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.0.3"
+VERSION = "2.1.0"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -77,32 +80,181 @@ def pad(s, w):
     return s + " " * max(0, w - plain_len(s))
 
 
-def banner():
-    art = [
-        "   ___   _____  _   _ ____  ",
-        "  / _ \\ |__  / | | | |  _ \\ ",
-        " / /_\\ \\  / /  | | | | |_) |",
-        "/ _____ \\/ /_  | |_| |  __/ ",
-        "\\_/   \\_/____|  \\___/|_|    ",
-    ]
+# ───────────────────────────── animation ─────────────────────────────
+# Opt out with AZUP_NO_ANIM=1, --no-anim, NO_COLOR, or by piping the output.
+ANIM = TTY and not os.environ.get("AZUP_NO_ANIM") and "--no-anim" not in sys.argv
+TRUECOLOR = COLOR and (
+    os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit")
+    or "WT_SESSION" in os.environ
+    or os.environ.get("TERM_PROGRAM") in ("iTerm.app", "vscode", "WezTerm", "ghostty"))
+
+ART = [
+    "   ___   _____  _   _ ____  ",
+    "  / _ \\ |__  / | | | |  _ \\ ",
+    " / /_\\ \\  / /  | | | | |_) |",
+    "/ _____ \\/ /_  | |_| |  __/ ",
+    "\\_/   \\_/____|  \\___/|_|    ",
+]
+STOPS = [(0, 90, 200), (0, 150, 235), (80, 220, 255)]            # Azure blues
+CONFETTI = [(242, 80, 34), (127, 186, 0), (0, 164, 239), (255, 185, 0), (180, 110, 255)]
+
+
+def rgb(r, g, b, s):
+    return f"\x1b[38;2;{r};{g};{b}m{s}\x1b[0m" if TRUECOLOR else azure(s)
+
+
+def lerp(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def grad(t):
+    t = min(1.0, max(0.0, t))
+    return lerp(STOPS[0], STOPS[1], t * 2) if t < .5 else lerp(STOPS[1], STOPS[2], (t - .5) * 2)
+
+
+def art_frame(pos):
+    """The banner as 5 coloured lines, with a white shine centred on column `pos`."""
+    w = max(len(l) for l in ART)
+    out = []
+    for line in ART:
+        if not TRUECOLOR:
+            out.append(azure(line))
+            continue
+        s = ""
+        for x, ch in enumerate(line):
+            if ch == " ":
+                s += " "
+                continue
+            k = max(0.0, 1 - abs(x - pos) / 5) ** 2 * 0.85
+            s += rgb(*lerp(grad(x / w), (255, 255, 255), k), ch)
+        out.append(s)
+    return out
+
+
+def banner(animate=False):
     print()
-    for line in art:
-        print("  " + azure(line))
-    print("  " + dim(f"Azure toolbox manager · v{VERSION} · {OS_NAME}"))
+    animate = animate and ANIM
+    if animate and TRUECOLOR:
+        w = max(len(l) for l in ART)
+        for n, pos in enumerate(range(-6, w + 10, 2)):
+            if n:
+                sys.stdout.write(f"\x1b[{len(ART)}A")
+            sys.stdout.write("\n".join("  " + l for l in art_frame(pos)) + "\n")
+            sys.stdout.flush()
+            time.sleep(0.025)
+    else:
+        for l in art_frame(-99):
+            print("  " + l)
+    tag = f"Azure toolbox manager · v{VERSION} · {OS_NAME}"
+    if animate:
+        sys.stdout.write("  ")
+        for ch in tag:
+            sys.stdout.write(dim(ch))
+            sys.stdout.flush()
+            time.sleep(0.008)
+        print()
+    else:
+        print("  " + dim(tag))
     print()
+
+
+# ── mascot ("Azzy", an original little cloud-bot) ──
+JOKES = [
+    "It works on my subscription.",
+    "Tried turning the tenant off and on again?",
+    "Naming things: still the hard part.",
+    "Please don't `az group delete` on a Friday.",
+    "I read your Bicep. It's lovely. (I'm a bot.)",
+    "Tags are a love language. Tag your stuff.",
+    "Tip: 'u' in the checklist ticks outdated.",
+    "Tip: `azup doctor` checks all your sign-ins.",
+    "Fun fact: Graph 'beta' is a lifestyle.",
+    "99 bugs in the code. Patch one: 117 bugs.",
+    "Localhost: the only region with 100% uptime.",
+    "Reticulating Azure splines…",
+    "Counting your subscriptions. Is that… 14?",
+    "Teaching the cloud to behave…",
+]
+CHEERS = ["All done! Your toolbox is looking sharp.",
+          "Done. That was smooth. Suspiciously smooth.",
+          "Everything is shipshape. No resource groups were harmed.",
+          "Fresh bits installed. Go deploy something!"]
+OOPS = ["Something went wrong. The log above knows more than I do.",
+        "Oops. Scroll up – the error is shy, but it's there."]
+BUBBLE_W = 46
+
+
+def mascot_rows(eyes="◕ ◕", mouth="‿"):
+    return ["    ╷    ", " ╭──┴──╮ ", f" │ {eyes} │ ", f" │  {mouth}  │ ", " ╰─────╯ "]
+
+
+def mascot_block(lines, eyes="◕ ◕", mouth="‿"):
+    """Mascot on the left, speech bubble on the right. Returns a list of strings."""
+    w = max(plain_len(l) for l in lines)
+    body = [f"│ {pad(l, w)} │" for l in lines]
+    bub = ["╭" + "─" * (w + 2) + "╮"] + body + ["╰" + "─" * (w + 2) + "╯"]
+    m = mascot_rows(eyes, mouth)
+    start = max(0, (len(m) - len(bub)) // 2)
+    mid = start + len(bub) // 2
+    rows = []
+    for r in range(max(len(m), len(bub) + start)):
+        left = azure(m[r]) if r < len(m) else " " * 9
+        j = r - start
+        right = dim(bub[j]) if 0 <= j < len(bub) else ""
+        tail = azure("◂ ") if r == mid else "  "
+        rows.append("  " + left + tail + right)
+    return rows
+
+
+def say(msg, mood="happy"):
+    eyes, mouth = {"happy": ("◕ ◕", "‿"), "sad": ("╥ ╥", "∩"), "think": ("◔ ◔", "─")}[mood]
+    lines = textwrap.wrap(msg, BUBBLE_W) or [""]
+    print("\n".join(mascot_block(lines, eyes, mouth)))
+
+
+def confetti(width=46):
+    if not ANIM:
+        return
+    syms = "✦✧·•*+"
+    for _ in range(12):
+        line = "".join(rgb(*random.choice(CONFETTI), random.choice(syms)) if random.random() < .35
+                       else " " for _ in range(width))
+        sys.stdout.write("\r  " + line + "\x1b[K")
+        sys.stdout.flush()
+        time.sleep(0.06)
+    sys.stdout.write("\r\x1b[K")
+
+
+def progress(i, n, width=18):
+    filled = int(width * i / max(n, 1))
+    cells = "".join(rgb(*grad(x / width), "█") if x < filled else dim("░") for x in range(width))
+    return f"▕{cells}▏"
 
 
 class Spinner:
+    """Plain spinner, or (mascot=True) Azzy with blinking eyes who tells jokes if you wait."""
     FR = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    EYES = ["◕ ◕"] * 8 + ["─ ─"] + ["◕ ◕"] * 5 + ["◔ ◔"] * 3 + ["◑ ◑"] * 3 + ["◕ ◕"] * 4
+    H = 5
 
-    def __init__(self, msg):
+    def __init__(self, msg, mascot=False):
         self.msg, self._stop = msg, threading.Event()
+        self.mascot = mascot and ANIM and shutil.get_terminal_size().columns >= 64
         self.t = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
-        i = 0
+        i, t0, seed = 0, time.time(), random.randrange(len(JOKES))
         while not self._stop.is_set():
-            sys.stdout.write(f"\r  {cyan(self.FR[i % 10])} {self.msg}\x1b[K")
+            if self.mascot:
+                el = time.time() - t0
+                text = self.msg if el < 2.5 else JOKES[(seed + int((el - 2.5) // 3.5)) % len(JOKES)]
+                text = pad(f"{cyan(self.FR[i % 10])} {text}", BUBBLE_W)
+                rows = mascot_block([text], self.EYES[(i // 2) % len(self.EYES)], "o")
+                if i:
+                    sys.stdout.write(f"\x1b[{self.H}A")
+                sys.stdout.write("".join("\x1b[K" + r + "\n" for r in rows))
+            else:
+                sys.stdout.write(f"\r  {cyan(self.FR[i % 10])} {self.msg}\x1b[K")
             sys.stdout.flush()
             i += 1
             time.sleep(0.08)
@@ -117,8 +269,10 @@ class Spinner:
         if TTY:
             self._stop.set()
             self.t.join()
-            sys.stdout.write("\r\x1b[K\x1b[?25h")
+            sys.stdout.write(f"\x1b[{self.H}A\x1b[J" if self.mascot else "\r\x1b[K")
+            sys.stdout.write("\x1b[?25h")
             sys.stdout.flush()
+
 
 
 # ───────────────────────────── catalog ─────────────────────────────
@@ -621,7 +775,8 @@ def execute(actions: List[Action], dry=False, yes=False):
             print(f"\n  {red('✘')} {t.name}: needs {bold(req)} – install it first")
             continue
         label = "Installing" if verb == "install" else "Updating"
-        print(f"\n  {azure('▶')} {bold(f'[{i}/{len(actions)}] {label} {t.name}')}")
+        print(f"\n  {progress(i - 1, len(actions))} {dim(f'{i}/{len(actions)}')}  "
+              f"{azure('▶')} {bold(f'{label} {t.name}')}")
         t0 = time.time()
         ok = stream(build_cmd(t, verb), dry)
         results.append((t, verb, ok, time.time() - t0, ""))
@@ -630,9 +785,18 @@ def execute(actions: List[Action], dry=False, yes=False):
         print(f"   {green('✔') if ok else red('✘')} {pad(t.name, 24)}{pad(dim(verb), 10)}"
               f"{dim(f'{dt:4.0f}s')}  {red(note) if note else ''}")
     bad = [r for r in results if not r[2]]
-    print()
-    if bad:
-        print(f"  {red(str(len(bad)))} failed – scroll up for the error output.\n")
+    print(f"\n  {progress(len(results) - len(bad), len(results))} "
+          f"{dim(f'{len(results) - len(bad)}/{len(results)}')}\n")
+    if not dry:
+        if bad:
+            say(random.choice(OOPS), "sad")
+            print(f"\n  {red(str(len(bad)))} failed – scroll up for the error output.\n")
+        else:
+            confetti()
+            say(random.choice(CHEERS))
+            print()
+    elif bad:
+        print(f"  {red(str(len(bad)))} failed.\n")
     return not bad
 
 
@@ -662,12 +826,13 @@ def interactive_ok():
 Row = Tuple[str, str, bool]   # label, hint, is_header
 
 
-def pick(title, rows: List[Row], multi=False, preselect=(), extra: Optional[Dict[bytes, Tuple[str, Callable]]] = None):
+def pick(title, rows: List[Row], multi=False, preselect=(), extra: Optional[Dict[bytes, Tuple[str, Callable]]] = None,
+         start=0):
     """Arrow-key menu.  Returns an index (single), a sorted list (multi) or None if cancelled."""
     sel = set(preselect)
     n = len(rows)
     sel_idx = [i for i, r in enumerate(rows) if not r[2]]
-    cur = sel_idx[0]
+    cur = start if start in sel_idx else sel_idx[0]
     extra = extra or {}
     keys = ["space toggle", "a all", "n none"] if multi else []
     keys += [f"{k.decode()} {v[0]}" for k, v in extra.items()]
@@ -724,7 +889,7 @@ def pause():
 
 # ───────────────────────────── commands ─────────────────────────────
 def load(check=True):
-    with Spinner("Inspecting your toolbox…"):
+    with Spinner("Inspecting your toolbox…", mascot=True):
         return detect(check)
 
 
@@ -920,13 +1085,39 @@ def cmd_self_update(a):
     return 0
 
 
+def clippy_says(st):
+    """Context-aware suggestion (message, index of the menu row to preselect)."""
+    n_out = sum(s.outdated for s in st.values())
+    miss = [t for t in TOOLS if t.core and not st[t.key].installed]
+    if n_out:
+        s_ = "s" if n_out != 1 else ""
+        return (f"It looks like {n_out} tool{s_} {'are' if n_out != 1 else 'is'} outdated. "
+                f"Would you like me to update {'them' if n_out != 1 else 'it'}?"), 1
+    if miss:
+        return (f"Your core toolbox is missing {len(miss)} piece{'s' if len(miss) != 1 else ''}. "
+                f"Want me to install {'them' if len(miss) != 1 else 'it'}?"), 2
+    return "Everything is up to date. Go deploy something!", 0
+
+
+def cmd_joke(a):
+    print()
+    say(random.choice(JOKES), "think")
+    print()
+    return 0
+
+
 def interactive():
     st = load(True)
+    first = True
     while True:
         sys.stdout.write("\x1b[2J\x1b[H")
-        banner()
+        banner(animate=first)
+        first = False
         print_table(st)
         n_out = sum(s.outdated for s in st.values())
+        msg, start = clippy_says(st)
+        say(msg)
+        print()
         rows = [("Select components…", "tick what to install or update", False),
                 ("Update everything", f"{n_out} outdated", False),
                 ("Install core profile", "az, azd, bicep, PowerShell, Az, Graph, resource-graph", False),
@@ -935,8 +1126,10 @@ def interactive():
                 ("Update azup", "get the latest version of this tool", False),
                 ("Refresh", "re-scan", False),
                 ("Quit", "", False)]
-        c = pick("What now?", rows)
+        c = pick("What now?", rows, start=start)
         if c is None or c == 7:
+            print()
+            say("Bye! May all your deployments be green.")
             print()
             return 0
         if c == 0:
@@ -962,6 +1155,7 @@ def interactive():
 def main():
     p = argparse.ArgumentParser(prog="azup", description="Install & update your Azure toolbox.")
     p.add_argument("-V", "--version", action="version", version=VERSION)
+    p.add_argument("--no-anim", action="store_true", help="disable animations (or set AZUP_NO_ANIM=1)")
     sub = p.add_subparsers(dest="cmd")
 
     def flags(sp):
@@ -989,6 +1183,7 @@ def main():
     l.add_argument("target", nargs="?", default="az", choices=["az", "azd", "ps", "graph", "all"])
     l.set_defaults(fn=cmd_login)
     sub.add_parser("self-update", help="update azup itself").set_defaults(fn=cmd_self_update)
+    sub.add_parser("joke", help="cheer me up").set_defaults(fn=cmd_joke)
     a = p.parse_args()
     try:
         if not a.cmd:
