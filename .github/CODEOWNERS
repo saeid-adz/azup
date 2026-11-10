@@ -1,0 +1,7 @@
+# Every change needs a look from the maintainer. Installers and CI get the same review as code,
+# because they decide what runs on people's machines.
+*                       @saeid-adz
+/install.sh             @saeid-adz
+/install.ps1            @saeid-adz
+/.github/               @saeid-adz
+/SECURITY.md            @saeid-adz

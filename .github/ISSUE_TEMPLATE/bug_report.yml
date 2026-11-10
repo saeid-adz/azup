@@ -1,0 +1,38 @@
+name: Bug report
+description: Something didn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Don't paste secrets, tokens, tenant or subscription IDs.** Redact anything private.
+        Security problem? Use the private report link instead of this form.
+  - type: input
+    id: version
+    attributes:
+      label: azup version
+      description: "Output of `azup --version`"
+    validations: { required: true }
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations: { required: true }
+  - type: input
+    id: osversion
+    attributes:
+      label: OS version / distro and shell
+      placeholder: "e.g. Windows 11 / PowerShell 7.4, Ubuntu 24.04 / zsh"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you run, what did you expect, what did you get?
+    validations: { required: true }
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: "Paste the terminal output (redacted). `azup --no-anim ...` gives clean text."
+      render: text

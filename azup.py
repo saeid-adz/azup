@@ -2272,9 +2272,19 @@ def shell_targets(which=None):
     return t
 
 
+def read_text(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def write_text(path, text):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
 def add_block(path, body):
     try:
-        text = open(path, encoding="utf-8").read()
+        text = read_text(path)
     except OSError:
         text = ""
     if NUDGE_START in text:
@@ -2287,7 +2297,7 @@ def add_block(path, body):
 
 def remove_block(path):
     try:
-        text = open(path, encoding="utf-8").read()
+        text = read_text(path)
     except OSError:
         return False
     new = re.sub(rf"\n?{re.escape(NUDGE_START)}.*?{re.escape(NUDGE_END)}\n?", "\n", text, flags=re.S)
@@ -2333,7 +2343,7 @@ def nudge_disable(a):
 
 def nudge_status(a):
     cfg, st = cfg_get().get("nudge", {}), jload("state.json") or {}
-    hooked = [p for _, p, _ in shell_targets() if NUDGE_START in (open(p, encoding="utf-8").read() if os.path.exists(p) else "")]
+    hooked = [p for _, p, _ in shell_targets() if NUDGE_START in (read_text(p) if os.path.exists(p) else "")]
     print(f"\n  {bold('Terminal nudge')}: {green('on') if cfg.get('enabled') else dim('off')}"
           + (f"  {dim('in ' + ', '.join(hooked))}" if hooked else ""))
     if st.get("checked"):
@@ -2466,8 +2476,8 @@ def sched_enable(freq, day, at, dry):
             show(f"would write {d}/azup-update.timer", tmr)
             return True
         os.makedirs(d, exist_ok=True)
-        open(os.path.join(d, "azup-update.service"), "w").write(svc)
-        open(os.path.join(d, "azup-update.timer"), "w").write(tmr)
+        write_text(os.path.join(d, "azup-update.service"), svc)
+        write_text(os.path.join(d, "azup-update.timer"), tmr)
         run(["systemctl", "--user", "daemon-reload"], 20)
         return run(["systemctl", "--user", "enable", "--now", "azup-update.timer"], 20)[0] == 0
     if have("crontab"):

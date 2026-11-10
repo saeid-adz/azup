@@ -59,6 +59,8 @@ pipx install git+https://github.com/saeid-adz/azup
 
 Open a new terminal and type `azup`. That's the whole setup. (Yes, really. Go get a coffee, or don't – we're not your manager.)
 
+> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.6.1 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.6.1'` first).
+
 > Prefer to read before you pipe to a shell? Good instincts. [`install.sh`](install.sh) and [`install.ps1`](install.ps1) are short and boring on purpose.
 
 ## 30-second tour
@@ -311,9 +313,13 @@ Open a new terminal so the PATH refreshes. azup refreshes PATH between steps, bu
 GitHub caches raw files for a few minutes. Give it five, or use `pipx upgrade azup` if you installed with pipx.
 </details>
 
+## Security
+
+azup runs package managers on your machine, so it's built to be inspectable and opt-in: it shows a plan before changing anything, never uses `sudo` or trusts a Homebrew tap without asking, has no telemetry, and anything that touches your shell profile or schedules a job is optional and reversible. The repository itself is locked down (protected `main` and tags, immutable releases, CI actions pinned to commit hashes, secret scanning with push protection, Dependabot, CodeQL). Details and how to report a vulnerability privately: [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
-PRs welcome, especially for tools azup doesn't know yet. Adding one is a single entry in `CATALOG`:
+PRs welcome (see [CONTRIBUTING.md](CONTRIBUTING.md)), especially for tools azup doesn't know yet. Adding one is a single entry in `CATALOG`:
 
 ```python
 Tool("azcopy", "AzCopy", "CLI", "pkg", "fast blob/file transfer",

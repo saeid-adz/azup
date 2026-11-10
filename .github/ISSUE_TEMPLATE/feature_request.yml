@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest an idea or a tool azup should manage
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations: { required: true }
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like azup to do?
+  - type: input
+    id: tool
+    attributes:
+      label: New tool? How is it installed on each OS?
+      placeholder: "brew formula / winget id / PowerShell module / az extension"
