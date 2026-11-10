@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.2.2
+- Windows: fix `azup` failing with "Unknown option: -3". The generated launcher quoted `-3`, which the `py` launcher then passed on to python.exe.
+
 ## 2.2.1
 - Windows installer: works on a fresh Windows 11 with no Python and no registered winget. It registers winget (App Installer) if needed and otherwise installs Python straight from python.org (per user, no admin rights).
 - azup itself tries to register winget before giving up, and finds it in `%LOCALAPPDATA%\Microsoft\WindowsApps`.

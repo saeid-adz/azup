@@ -95,7 +95,8 @@ Say "Downloading azup from github.com/$Repo ($Branch)"
 New-Item -ItemType Directory -Force -Path $Dir, $Bin | Out-Null
 Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/$Branch/azup.py" -OutFile (Join-Path $Dir 'azup.py') -UseBasicParsing
 
-$launcher = '"' + ($py -join '" "') + '" "%USERPROFILE%\.azup\azup.py" %*'
+# Quote only the executable. The py launcher ignores a quoted "-3", and hands it to python.exe instead.
+$launcher = '"' + $py[0] + '"' + ((@($py | Select-Object -Skip 1) | ForEach-Object { " $_" }) -join '') + ' "%USERPROFILE%\.azup\azup.py" %*'
 Set-Content -Path (Join-Path $Bin 'azup.cmd') -Value "@echo off`r`n$launcher" -Encoding ASCII
 
 $user = [Environment]::GetEnvironmentVariable('Path','User')
