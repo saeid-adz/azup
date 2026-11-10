@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.0
+- Linux: PowerShell is now installed from Microsoft's official release tarball into `~/.local` – no snap, no sudo, SHA-256 verified, updatable with `azup update`.
+- A tool found on PATH that doesn't even start (e.g. a broken snap `pwsh`) is treated as not installed, so azup can replace it.
+
 ## 2.1.2
 - Homebrew: if a package ends up "installed but not linked" (e.g. after the tap-trust retry), azup now runs `brew link` so the command actually works.
 - PowerShell: azup smoke-tests `pwsh` before installing modules. If it doesn't start, you get one clear explanation (with diagnostics to run) instead of one cryptic failure per module.

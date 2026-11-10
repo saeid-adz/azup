@@ -11,13 +11,16 @@
     azup self-update      update azup itself
     azup joke             Azzy tells a joke (animations: --no-anim or AZUP_NO_ANIM=1 to disable)
 
-Backends: Homebrew (macOS / Linux), winget (Windows), snap (PowerShell on Linux),
+Backends: Homebrew (macOS / Linux), winget (Windows), Microsoft's tarball (PowerShell on Linux, no sudo),
 PowerShellGet (PowerShell modules) and `az extension` / `az bicep`.
 Python 3.8+, standard library only.
 """
 import argparse
 import concurrent.futures as cf
+import glob
+import hashlib
 import json
+import platform
 import os
 import random
 import re
@@ -25,6 +28,8 @@ import select
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import textwrap
 import threading
 import time
@@ -42,7 +47,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.1.2"
+VERSION = "2.2.0"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -312,6 +317,7 @@ class Tool:
     cask: str = ""            # Homebrew cask (macOS only, preferred over formula there)
     winget: str = ""          # winget package id (Windows)
     snap: str = ""            # snap (Linux fallback when there is no brew formula)
+    ghtar: str = ""           # GitHub repo whose release tarball is installed to ~/.local (Linux, no sudo)
     cmd: str = ""             # binary name, used to spot installs made outside azup
     vcmd: Tuple[str, ...] = ()
     pkg: str = ""             # module / extension name for psmod / azext
@@ -342,7 +348,7 @@ CATALOG: List[Tool] = [
     Tool("terraform", "Terraform", "CLI", "pkg", "IaC (azurerm)",
          brew="hashicorp/tap/terraform", winget="Hashicorp.Terraform", cmd="terraform"),
     Tool("pwsh", "PowerShell 7", "PowerShell", "pkg", "needed for the modules below", True,
-         cask="powershell", winget="Microsoft.PowerShell", snap="powershell", cmd="pwsh"),
+         cask="powershell", winget="Microsoft.PowerShell", ghtar="PowerShell/PowerShell", cmd="pwsh"),
     Tool("Az", "Az PowerShell", "PowerShell", "psmod", "Azure PowerShell module", True, pkg="Az"),
     Tool("Microsoft.Graph", "Microsoft Graph SDK", "PowerShell", "psmod", "Graph API v1.0 cmdlets",
          True, pkg="Microsoft.Graph"),
@@ -371,6 +377,8 @@ def spec(t: Tool) -> Optional[Tuple[str, str]]:
         return ("brew", t.brew) if t.brew else None
     if t.brew:
         return ("brew", t.brew)
+    if t.ghtar:
+        return ("tarball", t.ghtar)
     return ("snap", t.snap) if t.snap else None
 
 
@@ -406,6 +414,9 @@ def refresh_path():
                   os.path.expanduser("~/.linuxbrew/bin")):
             if os.path.isdir(d) and d not in os.environ.get("PATH", "").split(":"):
                 os.environ["PATH"] += ":" + d
+        lb = os.path.expanduser("~/.local/bin")
+        if os.path.islink(os.path.join(lb, "pwsh")) and not os.environ.get("PATH", "").startswith(lb + ":"):
+            os.environ["PATH"] = lb + ":" + os.environ.get("PATH", "")   # prefer azup's PowerShell
 
 
 def resolve_exe(cmd):
@@ -479,6 +490,120 @@ def winget_state(pid):
             avail = tk[j + 1] if j + 1 < len(tk) and tk[j + 1] not in ("winget", "msstore") else ""
             return tk[j].lstrip("><~"), avail
     return None
+
+
+# ── Linux PowerShell: Microsoft's official release tarball, installed to ~/.local (no sudo) ──
+def pwsh_link():
+    return os.path.expanduser("~/.local/bin/pwsh")
+
+
+def linux_arch():
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64",
+            "armv7l": "arm32"}.get(platform.machine().lower())
+    if arch and glob.glob("/lib/ld-musl-*") and arch == "x64":
+        return "linux-musl-x64"                      # Alpine
+    return f"linux-{arch}" if arch else None
+
+
+def gh_json(url):
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                               "User-Agent": "azup"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return json.load(r)
+
+
+def tarball_state(repo, check_latest):
+    link = pwsh_link()
+    if not (os.path.islink(link) and os.path.exists(link)):
+        return None
+    m = re.search(r"/powershell/(\d+(?:\.\d+)+)/", os.readlink(link))
+    if not m:
+        return None
+    latest = ""
+    if check_latest:
+        try:
+            latest = gh_json(f"https://api.github.com/repos/{repo}/releases/latest")["tag_name"].lstrip("v")
+        except Exception:
+            pass
+    return m.group(1), latest
+
+
+def download(url, path):
+    req = urllib.request.Request(url, headers={"User-Agent": "azup"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(path, "wb") as f:
+        total, got = int(r.headers.get("Content-Length") or 0), 0
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+            if TTY and total:
+                sys.stdout.write(f"\r    {progress(got, total)} {got * 100 // total:3d}%")
+                sys.stdout.flush()
+    if TTY:
+        sys.stdout.write("\r\x1b[K")
+
+
+def tarball_install(t, verb, dry):
+    arch = linux_arch()
+    if not arch:
+        print(red(f"    unsupported CPU architecture: {platform.machine()}"))
+        return False
+    print("    " + dim(f"$ download latest {t.ghtar} {arch} tarball -> ~/.local/share/powershell/<version>"))
+    if dry:
+        return True
+    try:
+        rel = gh_json(f"https://api.github.com/repos/{t.ghtar}/releases/latest")
+        ver = rel["tag_name"].lstrip("v")
+        name = f"powershell-{ver}-{arch}.tar.gz"
+        assets = {a["name"]: a["browser_download_url"] for a in rel["assets"]}
+        if name not in assets or "hashes.sha256" not in assets:
+            raise RuntimeError(f"release {ver} has no {name} (or no checksum file)")
+        base = os.path.expanduser("~/.local/share/powershell")
+        dest = os.path.join(base, ver)
+        if verb == "update" and os.path.isfile(os.path.join(dest, "pwsh")):
+            print(f"    {green('✔')} {ver} is already the latest")
+            return True
+        os.makedirs(base, exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            tgz = os.path.join(tmp, name)
+            download(assets[name], tgz)
+            req = urllib.request.Request(assets["hashes.sha256"], headers={"User-Agent": "azup"})
+            raw = urllib.request.urlopen(req, timeout=30).read()
+            sums = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig")
+            expected = next((l.split()[0] for l in sums.splitlines() if l.strip().endswith(name)), None)
+            h = hashlib.sha256()
+            with open(tgz, "rb") as f:
+                for blk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(blk)
+            if not expected or h.hexdigest().lower() != expected.lower():
+                raise RuntimeError("checksum mismatch – refusing to install the download")
+            print(f"    {green('✔')} sha256 verified")
+            os.makedirs(dest, exist_ok=True)
+            with tarfile.open(tgz) as tar:
+                try:
+                    tar.extractall(dest, filter="data")
+                except TypeError:                    # Python < 3.12 without the filter argument
+                    tar.extractall(dest)
+        os.chmod(os.path.join(dest, "pwsh"), 0o755)
+        link = pwsh_link()
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(os.path.join(dest, "pwsh"), link)
+        for d in os.listdir(base):                   # drop older versions
+            if d != ver and re.match(r"^\d+(\.\d+)+", d):
+                shutil.rmtree(os.path.join(base, d), ignore_errors=True)
+        refresh_path()
+        print(f"    {green('✔')} PowerShell {ver} -> {link}")
+        if os.path.dirname(link) not in os.environ.get("PATH", "").split(":"):
+            print(yellow('    add to your shell profile:  export PATH="$HOME/.local/bin:$PATH"'))
+        return True
+    except Exception as e:
+        print(red(f"    {e}"))
+        return False
+
 
 
 def detect(check_latest=True) -> Dict[str, State]:
@@ -564,7 +689,9 @@ def detect(check_latest=True) -> Dict[str, State]:
     def bin_version(t):
         rc, out = run(list(t.vcmd) or [t.cmd, "--version"], 15)
         m = re.search(r"\d+(\.\d+)+", out)
-        return m.group(0) if m else "?"
+        if m:
+            return m.group(0)
+        return "?" if rc == 0 else ""           # "" = found on PATH but broken
 
     with cf.ThreadPoolExecutor(12) as ex:
         f_bl, f_bo = ex.submit(brew_list), ex.submit(brew_out)
@@ -576,6 +703,8 @@ def detect(check_latest=True) -> Dict[str, State]:
                 pm[t.key] = ex.submit(winget_state, s[1])
             elif s and s[0] == "snap":
                 pm[t.key] = ex.submit(snap_state, s[1])
+            elif s and s[0] == "tarball":
+                pm[t.key] = ex.submit(tarball_state, s[1], check_latest)
         bl, bo, pi, ae, bv = (f.result() for f in (f_bl, f_bo, f_pi, f_ae, f_bv))
         f_pl, f_el = ex.submit(ps_latest, pi), ex.submit(az_ext_latest, ae)
         ext_f = {}
@@ -591,7 +720,9 @@ def detect(check_latest=True) -> Dict[str, State]:
                 ext_f[t.key] = ex.submit(bin_version, t)
         pl, el = f_pl.result(), f_el.result()
         for k, f in ext_f.items():
-            st[k].installed, st[k].managed, st[k].version = True, False, f.result()
+            v = f.result()
+            if v:                                   # a binary that does not even start counts as missing
+                st[k].installed, st[k].managed, st[k].version = True, False, v
 
     for t in TOOLS:
         s, sp = st[t.key], specs[t.key]
@@ -599,10 +730,11 @@ def detect(check_latest=True) -> Dict[str, State]:
             if sp[0] in ("brew", "cask") and t.short in bl:
                 s.installed, s.version = True, bl[t.short]
                 s.latest = bo.get(t.short, bl[t.short]) if check_latest else ""
-            elif sp[0] in ("winget", "snap") and pm.get(t.key) and pm[t.key].result():
+            elif sp[0] in ("winget", "snap", "tarball") and pm.get(t.key) and pm[t.key].result():
                 v, avail = pm[t.key].result()
                 s.installed, s.version = True, v
-                s.latest = (avail or v) if (check_latest and sp[0] == "winget") else ""
+                s.latest = (avail or v) if (check_latest and sp[0] == "winget") else \
+                    (avail if sp[0] == "tarball" else "")
         elif t.kind == "psmod" and t.pkg in pi:
             s.installed, s.version, s.latest = True, pi[t.pkg], pl.get(t.pkg, "")
         elif t.kind == "azext" and t.pkg in ae:
@@ -668,7 +800,7 @@ def build_cmd(t: Tool, verb: str):
 
 def requires(t: Tool):
     if t.kind == "pkg":
-        return spec(t)[0]
+        return "" if spec(t)[0] == "tarball" else spec(t)[0]     # tarball needs no package manager
     return "powershell" if t.kind == "psmod" else "az"
 
 
@@ -701,12 +833,16 @@ def explain_broken_powershell(info):
     print("    Check it by hand:  " + bold(f"{exe} -NoProfile -Command '$PSVersionTable.PSVersion'"))
     if not IS_WIN:
         print("    Useful details:    " + bold("which -a pwsh; echo $TERM $HOME; ls -ld ~ ."))
+        print("    azup's Linux PowerShell build needs ICU: " + bold("sudo apt install -y libicu-dev")
+              + dim("  (Fedora/RHEL: sudo dnf install -y libicu)"))
         print("    Other ways to install PowerShell: "
               "https://learn.microsoft.com/powershell/scripting/install/install-other-linux")
     print("    Fix it, then re-run azup – it will pick up where it left off.")
 
 
 def has_requirement(req):
+    if not req:
+        return True
     if req == "powershell":
         return ps_exe() is not None
     return have({"cask": "brew"}.get(req, req))
@@ -822,7 +958,7 @@ def execute(actions: List[Action], dry=False, yes=False):
         return True
     rank = {"pkg": 0, "bicep": 2, "psmod": 1, "azext": 2}
     actions = sorted(actions, key=lambda a: rank[a[0].kind])
-    for mgr in sorted({requires(t) for t, _ in actions if t.kind == "pkg"}):
+    for mgr in sorted({requires(t) for t, _ in actions if t.kind == "pkg"} - {""}):
         if not ensure_manager(mgr, dry, yes):
             print(red(f"  cannot continue without {mgr}.\n"))
             return False
@@ -851,7 +987,10 @@ def execute(actions: List[Action], dry=False, yes=False):
         print(f"\n  {progress(i - 1, len(actions))} {dim(f'{i}/{len(actions)}')}  "
               f"{azure('▶')} {bold(f'{label} {t.name}')}")
         t0 = time.time()
-        ok = stream(build_cmd(t, verb), dry)
+        if t.kind == "pkg" and spec(t)[0] == "tarball":
+            ok = tarball_install(t, verb, dry)
+        else:
+            ok = stream(build_cmd(t, verb), dry)
         if t.key == "pwsh":
             _PS_CHECK.clear()                 # re-test the freshly installed PowerShell
         results.append((t, verb, ok, time.time() - t0, ""))

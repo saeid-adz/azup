@@ -119,7 +119,7 @@ Animations are tasteful and automatically off when you pipe output or run in CI.
 | Component | macOS | Linux | Windows |
 |---|---|---|---|
 | Azure CLI, azd, Functions Core Tools, kubelogin, kubectl, AzCopy, sqlcmd, Terraform | Homebrew | Homebrew | winget |
-| PowerShell 7 | Homebrew cask | snap | winget |
+| PowerShell 7 | Homebrew cask | official release tarball → `~/.local` (no sudo, SHA-256 verified) | winget |
 | Az, Microsoft.Graph, Graph.Beta, Microsoft.Entra | PowerShell Gallery | PowerShell Gallery | PowerShell Gallery |
 | Bicep, `az` extensions (resource-graph, azure-devops, aks-preview) | `az` | `az` | `az` |
 
@@ -159,6 +159,12 @@ Homebrew needs sudo once to create its directory. azup asks for your sudo passwo
 ```sh
 sudo apt update && sudo apt install -y build-essential procps curl file git
 ```
+</details>
+
+<details>
+<summary><b>Linux: PowerShell installed but won't start</b></summary>
+
+azup installs PowerShell from Microsoft's release tarball and smoke-tests it. The build needs ICU: `sudo apt install -y libicu-dev` (Debian/Ubuntu) or `sudo dnf install -y libicu` (Fedora/RHEL). A `pwsh` that is on your PATH but doesn't start (for example a broken snap) counts as *not installed*, so azup can install a working one; make sure `~/.local/bin` is on your PATH.
 </details>
 
 <details>
