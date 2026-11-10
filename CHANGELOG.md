@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.6.0
+- **Parallel installs and updates.** Work runs in lanes (Homebrew, PowerShell Az, PowerShell Graph/Entra, `az`, `azd`, winget, tarball) with a live status board. Homebrew formulas are batched into one `brew` call, steps wait for the tools they depend on (PowerShell → modules, az → extensions, azd → azd extensions), and anything that may prompt (macOS casks, trusting a tap) runs on its own with a real terminal.
+- `-j/--jobs N` (default 4; `-j 1` = sequential; env `AZUP_JOBS`) on `install`, `update` and `select`.
+- Unattended `schedule` runs log one block per tool.
+
 ## 2.5.0
 - **What's new before updating:** `azup changes [tools]`, `azup update --changes`, and a `c` option at the "Proceed?" prompt show release notes (GitHub releases, Azure CLI release notes, az-extension `HISTORY.rst`) for just the versions between yours and the latest.
 - **Terminal nudge:** `azup nudge enable` adds a one-line hook to your shell profile; once a day it prints "N tools outdated" from a background-refreshed cache (~70 ms). `nudge snooze|status|disable`.

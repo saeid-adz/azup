@@ -54,7 +54,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -572,10 +572,10 @@ def download(url, path):
                 break
             f.write(chunk)
             got += len(chunk)
-            if TTY and total:
+            if TTY and total and not is_quiet():
                 sys.stdout.write(f"\r    {progress(got, total)} {got * 100 // total:3d}%")
                 sys.stdout.flush()
-    if TTY:
+    if TTY and not is_quiet():
         sys.stdout.write("\r\x1b[K")
 
 
@@ -975,6 +975,371 @@ def proceed(actions, st, yes=False):
 
 
 # ───────────────────────────── execution ─────────────────────────────
+# ───────────────────────────── parallel engine ─────────────────────────────
+# Work is split into "lanes", one per backend, that run side by side:
+#   brew (formulas are batched into ONE `brew` call so Homebrew downloads in parallel itself)
+#   ps-az / ps-graph (PowerShell modules; Az and Graph share no dependencies, Graph/Beta/Entra do)
+#   az (extensions + Bicep) · azd (extensions) · winget · tarball
+# Inside a lane steps run one after another. A step that needs another tool (modules need PowerShell,
+# `az` extensions need Azure CLI...) waits for it, and fails cleanly if that tool failed.
+QUIET = threading.local()          # set in worker threads: no prompts, stdin closed, output captured
+PREREQ = {"psmod": "pwsh", "azext": "az", "bicep": "az", "azdext": "azd"}
+LANE_LABEL = {"brew": "brew", "ps-az": "pwsh", "ps-graph": "pwsh", "az": "az", "azd": "azd",
+              "winget": "winget", "tarball": "tarball", "snap": "snap"}
+_PS_PRE_LOCK, _PS_PRE_DONE = threading.Lock(), [False]
+_SHOWN: set = set()
+
+
+def is_quiet():
+    return getattr(QUIET, "on", False)
+
+
+def lane_of(t: Tool):
+    if t.kind == "pkg":
+        return {"cask": "brew"}.get(spec(t)[0], spec(t)[0])
+    if t.kind == "psmod":
+        return "ps-az" if t.pkg == "Az" or t.pkg.startswith("Az.") else "ps-graph"
+    return {"azext": "az", "bicep": "az", "azdext": "azd"}[t.kind]
+
+
+class JobBuf:
+    """Captures one job's output; remembers the last meaningful line for the status board."""
+    def __init__(self):
+        self.lines, self.cur, self.saved, self.last = [], "", "", ""
+
+    def write(self, x):
+        for ch in x:
+            if ch == "\r":
+                self.saved, self.cur = self.cur, ""
+            elif ch == "\n":
+                line = self.cur or self.saved
+                self.lines.append(line)
+                if line.strip():
+                    self.last = ANSI.sub("", line).strip()
+                self.cur = self.saved = ""
+            else:
+                self.cur += ch
+                self.saved = ""
+        if self.cur.strip():
+            self.last = ANSI.sub("", self.cur).strip()
+        return len(x)
+
+    def flush(self):
+        pass
+
+    def text(self):
+        return "\n".join(self.lines + ([self.cur] if self.cur else []))
+
+
+class Router:
+    """sys.stdout replacement: each worker thread writes into its own job buffer."""
+    def __init__(self, real):
+        self.real, self.bufs = real, {}
+
+    def attach(self, buf):
+        self.bufs[threading.get_ident()] = buf
+
+    def write(self, x):
+        b = self.bufs.get(threading.get_ident())
+        return self.real.write(x) if b is None else b.write(x)
+
+    def flush(self):
+        self.real.flush()
+
+    def isatty(self):
+        return False
+
+    def reconfigure(self, **kw):
+        pass
+
+
+class Job:
+    def __init__(self, tool, verb):
+        self.tool, self.verb, self.lane = tool, verb, lane_of(tool)
+        self.state, self.note, self.ok = "queued", "", None
+        self.t0 = self.t1 = 0.0
+        self.buf = JobBuf()
+        self.wait_for = ""
+
+    def took(self):
+        return (self.t1 or time.time()) - self.t0 if self.t0 else 0.0
+
+
+class Board:
+    """Live status board: one line per task, updated in place."""
+    def __init__(self, jobs, real, title):
+        self.jobs, self.real, self.title = jobs, real, title
+        self.stop_ev, self.H = threading.Event(), len(jobs) + 2
+        self.t = threading.Thread(target=self._run, daemon=True)
+
+    def frame(self):
+        n = len(self.jobs)
+        cols = shutil.get_terminal_size((100, 24)).columns
+        spin = Spinner.FR[int(time.time() * 12) % 10]
+        done = sum(j.state in ("ok", "fail") for j in self.jobs)
+        run = sum(j.state == "running" for j in self.jobs)
+        out = [f"  {azure('»')} {bold(self.title)}  {dim(f'{run} running · {done}/{n} done')}"]
+        avail = max(10, cols - 52)
+        for j in self.jobs:
+            if j.state == "queued":
+                icon, hint = dim("○"), dim("queued")
+            elif j.state == "waiting":
+                icon, hint = yellow("◌"), yellow(f"waiting for {j.wait_for}")
+            elif j.state == "running":
+                icon, hint = cyan(spin), dim(clip(j.buf.last, avail))
+            elif j.state == "ok":
+                icon, hint = green("✔"), dim("done")
+            else:
+                icon, hint = red("✘"), red(clip(j.note or "failed", avail))
+            t = f"{j.took():4.0f}s" if j.t0 else "     "
+            out.append(f"   {icon} {pad(bold(j.tool.name) if j.state == 'running' else j.tool.name, 24)}"
+                       f"{pad(dim(LANE_LABEL.get(j.lane, j.lane)), 9)}{dim(t)}  {hint}")
+        out.append(f"  {progress(done, n)} {dim(f'{done}/{n}')}")
+        return out
+
+    def draw(self, first):
+        if not first:
+            self.real.write(f"\x1b[{self.H}A")
+        self.real.write("".join("\x1b[K" + l + "\n" for l in self.frame()))
+        self.real.flush()
+
+    def _run(self):
+        first = True
+        while not self.stop_ev.is_set():
+            self.draw(first)
+            first = False
+            time.sleep(0.1)
+        self.draw(first)
+
+    def start(self):
+        self.real.write("\x1b[?25l")
+        self.t.start()
+
+    def stop(self):
+        self.stop_ev.set()
+        self.t.join()
+        self.real.write("\x1b[?25h")
+        self.real.flush()
+
+
+def ps_preflight():
+    """Trust PSGallery once, before concurrent module installs (two writers would race on that file)."""
+    with _PS_PRE_LOCK:
+        if not _PS_PRE_DONE[0]:
+            subprocess.run(resolve_exe(ps_cmd("Set-PSRepository PSGallery -InstallationPolicy Trusted "
+                                              "-ErrorAction SilentlyContinue")),
+                           capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
+            _PS_PRE_DONE[0] = True
+
+
+def run_one(t: Tool, verb, dry):
+    """Run a single install/update with its pre-checks. Returns (ok, note)."""
+    req = requires(t)
+    refresh_path()
+    if not dry and not has_requirement(req):
+        print(f"\n  {red('✘')} {t.name}: needs {bold(req)} – install it first")
+        return False, f"needs {req} – install it first"
+    if not dry and t.kind == "azdext" and t.min_azd:
+        rc_, out_ = run(["azd", "version"], 20)
+        m_ = re.search(r"(\d+\.\d+\.\d+)", out_)
+        have_v = m_.group(1) if m_ else "0"
+        if vtuple(have_v) < vtuple(t.min_azd):
+            note = f"needs azd >= {t.min_azd} (you have {have_v}) – update azd first"
+            print(f"\n  {red('✘')} {t.name}: {note}")
+            return False, note
+    if not dry and t.kind == "psmod":
+        works, info = ps_works()
+        if not works:
+            if "ps" not in _SHOWN:
+                _SHOWN.add("ps")
+                explain_broken_powershell(info)
+            return False, "PowerShell does not start"
+        if is_quiet():
+            ps_preflight()
+    if t.kind == "pkg" and spec(t)[0] == "tarball":
+        ok = tarball_install(t, verb, dry)
+    else:
+        ok = stream(build_cmd(t, verb), dry)
+    if t.key == "pwsh":
+        _PS_CHECK.clear()                     # re-test the freshly installed PowerShell
+    return ok, ""
+
+
+def run_sequential(actions, dry):
+    results = []
+    for i, (t, verb) in enumerate(actions, 1):
+        label = "Installing" if verb == "install" else "Updating"
+        print(f"\n  {progress(i - 1, len(actions))} {dim(f'{i}/{len(actions)}')}  "
+              f"{azure('▶')} {bold(f'{label} {t.name}')}")
+        t0 = time.time()
+        ok, note = run_one(t, verb, dry)
+        results.append((t, verb, ok, time.time() - t0, note))
+    return results
+
+
+def run_parallel(actions, jobs, yes=False):
+    real = sys.stdout
+    jl = [Job(t, v) for t, v in actions]
+    by_key = {j.tool.key: j for j in jl}
+    done_ev = {j.tool.key: threading.Event() for j in jl}
+    emit_lock = threading.Lock()
+    interactive = TTY and sys.stdin.isatty()
+
+    def finish(j, ok, note=""):
+        j.ok, j.note, j.t1 = ok, note, time.time()
+        j.state = "ok" if ok else "fail"
+        done_ev[j.tool.key].set()
+        if not use_board:                                    # plain/log mode: one block per finished job
+            with emit_lock:
+                real.write(f"\n  {green('✔') if ok else red('✘')} {bold(j.tool.name)}  "
+                           f"{dim(LANE_LABEL.get(j.lane, j.lane) + ' · ' + format(j.took(), '.0f') + 's')}"
+                           + (f"  {red(note)}" if note else "") + "\n")
+                for l in j.buf.text().splitlines():
+                    real.write(dim("      " + l) + "\n")
+                real.flush()
+
+    # 1) things that may ask for a password (macOS casks) run first, one at a time, with a real terminal
+    first = [j for j in jl if j.tool.kind == "pkg" and spec(j.tool)[0] == "cask"] if interactive else []
+    for j in first:
+        use_board = False
+        print(f"\n  {azure('▶')} {bold(('Installing ' if j.verb == 'install' else 'Updating ') + j.tool.name)}  {dim('(may ask for your password)')}")
+        j.t0, j.state = time.time(), "running"
+        ok, note = run_one(j.tool, j.verb, False)
+        j.ok, j.note, j.t1, j.state = ok, note, time.time(), "ok" if ok else "fail"
+        done_ev[j.tool.key].set()
+    rest = [j for j in jl if j not in first]
+    if not rest:
+        return [(j.tool, j.verb, j.ok, j.took(), j.note) for j in jl]
+
+    use_board = interactive and TTY and len(rest) + 3 <= shutil.get_terminal_size((100, 24)).lines
+    lanes = {}
+    for j in rest:
+        lanes.setdefault(j.lane, []).append(j)
+    for lane in lanes.values():                              # prerequisites first, so dependents unblock early
+        lane.sort(key=lambda j: 0 if j.tool.key in PREREQ.values() else 1)
+    router = Router(real)
+
+    def wait_prereq(j):
+        need = PREREQ.get(j.tool.kind)
+        if need and need in done_ev and need != j.tool.key:
+            j.state, j.wait_for = "waiting", {"pwsh": "PowerShell", "az": "Azure CLI", "azd": "azd"}[need]
+            done_ev[need].wait()
+            if by_key[need].ok is False:
+                return f"needs {j.wait_for} – it failed"
+        return ""
+
+    def run_job(j, shared_buf=None):
+        if shared_buf is not None:
+            j.buf = shared_buf
+        router.attach(j.buf)
+        why = wait_prereq(j)
+        j.t0, j.state = time.time(), "running"
+        if why:
+            finish(j, False, why)
+            return
+        try:
+            ok, note = run_one(j.tool, j.verb, False)
+        except Exception as e:                               # never let a lane die silently
+            ok, note = False, f"{e.__class__.__name__}: {e}"
+        finish(j, ok, note)
+
+    def brew_batch(batch):
+        """One `brew install a b c` for several formulas; if it fails, redo them one by one."""
+        shared = JobBuf()
+        router.attach(shared)
+        for j in batch:
+            j.buf, j.t0, j.state = shared, time.time(), "running"
+        verb = batch[0].verb
+        cmd = ["brew", "install" if verb == "install" else "upgrade"] + [spec(j.tool)[1] for j in batch]
+        try:
+            ok = stream(cmd, False)
+        except Exception:
+            ok = False
+        if ok:
+            for j in batch[1:]:
+                j.buf = JobBuf()
+                j.buf.write("(installed in the same brew batch)\n")
+            for j in batch:
+                finish(j, True)
+            return
+        print(f"\n  {yellow('▲')} batch failed – retrying one by one")
+        for j in batch:
+            j.buf = JobBuf()
+            run_job(j)
+
+    def lane_worker(name, js):
+        QUIET.on = True
+        try:
+            steps, cur = [], []
+            if name == "brew":                               # batch plain formulas per verb, prerequisites first
+                for grp in ([j for j in js if j.tool.key in PREREQ.values()], [j for j in js if j.tool.key not in PREREQ.values()]):
+                    for v in ("install", "update"):
+                        g = [j for j in grp if j.verb == v and spec(j.tool)[0] == "brew"]
+                        if len(g) >= 2:
+                            steps.append(g)
+                        else:
+                            steps += [[j] for j in g]
+                steps += [[j] for j in js if spec(j.tool)[0] == "cask"]
+            else:
+                steps = [[j] for j in js]
+            for step in steps:
+                if len(step) > 1:
+                    brew_batch(step)
+                else:
+                    run_job(step[0])
+        finally:
+            for j in js:                                     # unblock dependents whatever happens
+                if j.ok is None:
+                    finish(j, False, "interrupted")
+
+    title = f"{len(jl)} tasks · {len(lanes)} lanes in parallel"
+    board = Board(jl, real, title) if use_board else None
+    if not use_board:
+        real.write(f"\n  {azure('»')} {bold(title)}\n")
+    sys.stdout = router
+    if board:
+        board.start()
+    try:
+        order = sorted(lanes, key=lambda n: any(PREREQ.get(j.tool.kind) for j in lanes[n]))   # independent lanes first
+        with cf.ThreadPoolExecutor(max_workers=max(1, min(jobs, len(lanes)))) as ex:
+            futs = [ex.submit(lane_worker, n, lanes[n]) for n in order]
+            for f in futs:
+                f.result()
+    finally:
+        sys.stdout = real
+        if board:
+            board.stop()
+    # 2) anything that needs you (Homebrew asking to trust a tap) is handled now, one at a time
+    for j in jl:
+        txt = j.buf.text()
+        if j.ok is False and "untrusted tap" in txt and interactive and trust_tap(txt):
+            print(f"\n  {azure('▶')} {bold('Retrying ' + j.tool.name)}")
+            t0 = time.time()
+            ok, note = run_one(j.tool, j.verb, False)
+            j.ok, j.note, j.t1, j.t0, j.state = ok, note, time.time(), t0, "ok" if ok else "fail"
+    if use_board:                                            # show why things failed
+        for j in jl:
+            if j.ok is False and j.buf.lines:
+                print(f"\n  {red('✘')} {bold(j.tool.name)} {dim('– last output')}")
+                for l in j.buf.text().splitlines()[-25:]:
+                    print(dim("      " + l))
+    return [(j.tool, j.verb, bool(j.ok), j.took(), j.note) for j in jl]
+
+
+def resolve_jobs(jobs):
+    if jobs:
+        return max(1, int(jobs))
+    env = os.environ.get("AZUP_JOBS", "")
+    return max(1, int(env)) if env.isdigit() else 4
+
+
+def can_parallel(actions):
+    lanes = {lane_of(t) for t, _ in actions}
+    brews = sum(1 for t, _ in actions if t.kind == "pkg" and spec(t)[0] == "brew")
+    return len(actions) >= 2 and (len(lanes) >= 2 or brews >= 2)
+
+
+
 def build_cmd(t: Tool, verb: str):
     inst = verb == "install"
     if t.kind == "pkg":
@@ -990,9 +1355,9 @@ def build_cmd(t: Tool, verb: str):
                (["--classic"] if inst else [])
     if t.kind == "psmod":
         if inst:
-            return ps_cmd("Set-PSRepository PSGallery -InstallationPolicy Trusted "
-                          "-ErrorAction SilentlyContinue;"
-                          f"Install-Module {t.pkg} -Scope CurrentUser -Force -AllowClobber "
+            return ps_cmd(("" if _PS_PRE_DONE[0] else
+                           "Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue;")
+                          + f"Install-Module {t.pkg} -Scope CurrentUser -Force -AllowClobber "
                           "-ErrorAction Stop")
         return ps_cmd(f"Update-Module {t.pkg} -Force -ErrorAction Stop")
     if t.kind == "azext":
@@ -1116,14 +1481,13 @@ def stream(cmd, dry):
     if dry:
         return True
     try:
-        if cmd[0] == "brew" or SCHEDULED:
+        if cmd[0] == "brew" or SCHEDULED or is_quiet():
             rc, out = run_tee(cmd)
-            if rc != 0 and "untrusted tap" in out and trust_tap(out):
+            if rc != 0 and "untrusted tap" in out and not is_quiet() and trust_tap(out):
                 rc, out = run_tee(cmd)        # retry once after trusting
             if rc == 0 and "not linked" in out:
                 # e.g. the first attempt installed the keg but died before linking it
-                m = re.search(r"brew link (\S+)", out)
-                if m:
+                for m in re.finditer(r"brew link (\S+)", out):
                     print("    " + dim(f"$ brew link {m.group(1)}"))
                     rc, _ = run_tee(["brew", "link", m.group(1)])
             return rc == 0
@@ -1136,6 +1500,7 @@ def stream(cmd, dry):
 def run_tee(cmd):
     """Run a command, echo its output live and also return it."""
     p = subprocess.Popen(resolve_exe(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL if is_quiet() else None,
                          text=True, encoding="utf-8", errors="replace")
     buf = []
     for line in p.stdout:
@@ -1167,7 +1532,7 @@ def trust_tap(output):
 Action = Tuple[Tool, str]
 
 
-def execute(actions: List[Action], dry=False, yes=False):
+def execute(actions: List[Action], dry=False, yes=False, jobs=None):
     if not actions:
         print(f"  {green('✔')} nothing to do.\n")
         return True
@@ -1181,42 +1546,12 @@ def execute(actions: List[Action], dry=False, yes=False):
            for t, v in actions):
         print(f"\n  {azure('▶')} {bold('Refreshing Homebrew index')}")
         stream(["brew", "update"], dry)
-    results = []
-    shown_ps = False
-    for i, (t, verb) in enumerate(actions, 1):
-        req = requires(t)
-        refresh_path()
-        if not dry and not has_requirement(req):
-            results.append((t, verb, False, 0.0, f"needs {req} – install it first"))
-            print(f"\n  {red('✘')} {t.name}: needs {bold(req)} – install it first")
-            continue
-        if not dry and t.kind == "azdext" and t.min_azd:
-            rc_, out_ = run(["azd", "version"], 20)
-            m_ = re.search(r"(\d+\.\d+\.\d+)", out_)
-            have_v = m_.group(1) if m_ else "0"
-            if vtuple(have_v) < vtuple(t.min_azd):
-                results.append((t, verb, False, 0.0, f"needs azd >= {t.min_azd} (you have {have_v}) – update azd first"))
-                print(f"\n  {red('✘')} {t.name}: needs azd >= {t.min_azd} (you have {have_v}) – update azd first")
-                continue
-        if not dry and t.kind == "psmod":
-            works, info = ps_works()
-            if not works:
-                if not shown_ps:
-                    explain_broken_powershell(info)
-                    shown_ps = True
-                results.append((t, verb, False, 0.0, "PowerShell does not start"))
-                continue
-        label = "Installing" if verb == "install" else "Updating"
-        print(f"\n  {progress(i - 1, len(actions))} {dim(f'{i}/{len(actions)}')}  "
-              f"{azure('▶')} {bold(f'{label} {t.name}')}")
-        t0 = time.time()
-        if t.kind == "pkg" and spec(t)[0] == "tarball":
-            ok = tarball_install(t, verb, dry)
-        else:
-            ok = stream(build_cmd(t, verb), dry)
-        if t.key == "pwsh":
-            _PS_CHECK.clear()                 # re-test the freshly installed PowerShell
-        results.append((t, verb, ok, time.time() - t0, ""))
+    _SHOWN.clear()
+    n_jobs = resolve_jobs(jobs)
+    if not dry and n_jobs > 1 and can_parallel(actions):
+        results = run_parallel(actions, n_jobs, yes)
+    else:
+        results = run_sequential(actions, dry)
     print("\n  " + bold("Summary"))
     for t, verb, ok, dt, note in results:
         print(f"   {green('✔') if ok else red('✘')} {pad(t.name, 24)}{pad(dim(verb), 10)}"
@@ -1359,7 +1694,7 @@ def hint_for(s: State):
     return green(f"{s.version} ✔")
 
 
-def select_flow(st=None, dry=False, yes=False):
+def select_flow(st=None, dry=False, yes=False, jobs=None):
     """One checklist for everything: missing -> install, outdated -> update."""
     if not interactive_ok():
         print(red("  the checklist needs an interactive terminal."))
@@ -1408,7 +1743,7 @@ def select_flow(st=None, dry=False, yes=False):
     if not proceed(actions, st, yes):
         print("  cancelled.\n")
         return True
-    return execute(actions, dry, yes)
+    return execute(actions, dry, yes, jobs)
 
 
 def cmd_status(a):
@@ -1418,7 +1753,7 @@ def cmd_status(a):
 
 
 def cmd_select(a):
-    return 0 if select_flow(dry=a.dry_run, yes=a.yes) else 1
+    return 0 if select_flow(dry=a.dry_run, yes=a.yes, jobs=a.jobs) else 1
 
 
 def cmd_install(a):
@@ -1432,7 +1767,7 @@ def cmd_install(a):
     skipped = [t.name for t in tools if st[t.key].installed]
     if skipped:
         print(dim("  already installed: " + ", ".join(skipped)))
-    return 0 if execute(todo, a.dry_run, a.yes) else 1
+    return 0 if execute(todo, a.dry_run, a.yes, a.jobs) else 1
 
 
 def cmd_update(a):
@@ -1450,7 +1785,7 @@ def cmd_update(a):
         if not proceed([], st, a.yes):
             print("  cancelled.\n")
             return 0
-    return 0 if execute(acts, a.dry_run, a.yes) else 1
+    return 0 if execute(acts, a.dry_run, a.yes, a.jobs) else 1
 
 
 def cmd_changes(a):
@@ -2374,6 +2709,8 @@ def main():
     def flags(sp):
         sp.add_argument("-n", "--dry-run", action="store_true", help="show commands, change nothing")
         sp.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+        sp.add_argument("-j", "--jobs", type=int, metavar="N", default=None,
+                        help="run up to N things in parallel (default 4; -j 1 = one at a time; env AZUP_JOBS)")
 
     s = sub.add_parser("status", aliases=["ls"], help="show installed / outdated")
     s.add_argument("--offline", action="store_true", help="skip latest-version lookup")

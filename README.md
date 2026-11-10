@@ -78,6 +78,7 @@ azup schedule enable          # update automatically (weekly, Mondays 09:00)
 azup whoami                   # who am I signed in as, in every tool?
 azup ctx                      # switch subscription everywhere at once (type to filter)
 azup install --profile ai     # core + Foundry / AI tooling
+azup install --all -j 6       # everything, up to 6 things at once (default 4; -j 1 = one at a time)
 azup self-update              # update azup itself
 azup joke                     # you've earned it
 ```
@@ -99,6 +100,31 @@ Add `-n/--dry-run` to see exactly what would run (changes nothing) and `-y/--yes
 ```
 
 Missing → **install**. Outdated → **update**. Already fine → left alone. You always get a plan and a "Proceed?" before anything happens.
+
+## Fast: installs and updates run in parallel
+
+`azup install` and `azup update` don't wait in line. Work is split into **lanes**, one per backend, that run side by side while a live board shows every task:
+
+```text
+  » 12 tasks · 5 lanes in parallel  6 running · 5/12 done
+   ✔ Azure CLI               brew        3s  done
+   ⠧ Functions Core Tools    brew        3s  ==> Downloading azcopy
+   ⠧ AzCopy                  brew        3s  ==> Downloading azcopy
+   ✔ Az PowerShell           pwsh        4s  done
+   ⠧ Microsoft Graph Beta    pwsh        1s  Installing Microsoft.Graph.Beta ...
+   ◌ ext: resource-graph     az              waiting for Azure CLI
+   ○ Bicep                   az              queued
+  ▕███████░░░░░░░░░░░▏ 5/12
+```
+
+It's fast *and* safe, because not everything can run at once:
+
+- **Homebrew** formulas are installed in a single `brew` call, so Homebrew downloads them in parallel itself (and azup retries one by one if the batch fails).
+- **PowerShell modules** use two lanes: `Az` runs alongside `Microsoft.Graph*` / `Entra` (which share dependencies and so stay in order).
+- Things that **need another tool wait for it**: modules wait for PowerShell, `az` extensions for Azure CLI, `azd` extensions for `azd`. If that tool failed, they say so instead of failing mysteriously.
+- Anything that **may ask you something** (a password for a macOS cask, trusting a Homebrew tap) runs one at a time with a real terminal, never hidden in the background.
+
+In a test with realistic delays, a 12-tool install dropped from 35 s to 9 s. Real-world gains depend on your network and the tools you pick, since the biggest downloads still take as long as they take. `-j 1` (or `AZUP_JOBS=1`) gives you the old one-at-a-time behaviour; `-n` (dry run) always lists steps in order. Unattended `azup schedule` runs use the same engine and write one block per tool to the log.
 
 ## What's new before you update
 
