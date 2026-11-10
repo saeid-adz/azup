@@ -1,5 +1,8 @@
 # Changelog
 
+## 2.1.1
+- Azzy is now an Azure-style "A" with eyes (light left half, dark right half) in the terminal, README demo and banner.
+
 ## 2.1.0
 - Animations: shimmering gradient banner, **Azzy** the mascot (blinking eyes, jokes while loading, Clippy-style suggestions that pre-select the right menu row), progress bars and a confetti finish. Off with `--no-anim`, `AZUP_NO_ANIM=1`, `NO_COLOR` or when output is piped.
 - New `azup joke`.

@@ -42,7 +42,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -184,8 +184,32 @@ OOPS = ["Something went wrong. The log above knows more than I do.",
 BUBBLE_W = 46
 
 
+# Azzy is an "A" (a nod to the Azure shape, drawn from scratch): light left half, dark right half.
+# 'e' = eye cell, 'm' = mouth cell.
+MASCOT = ["    ▟███▙    ",
+          "   ▟█████▙   ",
+          "  ▟█e███e█▙  ",
+          " ▟████m████▙ ",
+          "▟██▘     ▝██▙"]
+MASCOT_W = 13
+
+
 def mascot_rows(eyes="◕ ◕", mouth="‿"):
-    return ["    ╷    ", " ╭──┴──╮ ", f" │ {eyes} │ ", f" │  {mouth}  │ ", " ╰─────╯ "]
+    out = []
+    for row in MASCOT:
+        s, seen = "", 0
+        for x, ch in enumerate(row):
+            fg, bg = ("38;5;81", "48;5;81") if x < MASCOT_W // 2 else ("38;5;33", "48;5;33")
+            if ch == " ":
+                s += " "
+            elif ch in "em":
+                g = mouth if ch == "m" else (eyes[0] if not seen else eyes[-1])
+                seen += ch == "e"
+                s += f"\x1b[97;{bg}m{g}\x1b[0m" if COLOR else g
+            else:
+                s += f"\x1b[{fg}m{ch}\x1b[0m" if COLOR else ch
+        out.append(s)
+    return out
 
 
 def mascot_block(lines, eyes="◕ ◕", mouth="‿"):
@@ -198,7 +222,7 @@ def mascot_block(lines, eyes="◕ ◕", mouth="‿"):
     mid = start + len(bub) // 2
     rows = []
     for r in range(max(len(m), len(bub) + start)):
-        left = azure(m[r]) if r < len(m) else " " * 9
+        left = m[r] if r < len(m) else " " * MASCOT_W
         j = r - start
         right = dim(bub[j]) if 0 <= j < len(bub) else ""
         tail = azure("◂ ") if r == mid else "  "
@@ -239,7 +263,7 @@ class Spinner:
 
     def __init__(self, msg, mascot=False):
         self.msg, self._stop = msg, threading.Event()
-        self.mascot = mascot and ANIM and shutil.get_terminal_size().columns >= 64
+        self.mascot = mascot and ANIM and shutil.get_terminal_size().columns >= 72
         self.t = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):

@@ -96,11 +96,11 @@ Missing → **install**. Outdated → **update**. Already fine → left alone. Y
 ## Meet Azzy 🤖
 
 ```text
-      ╷         ╭──────────────────────────────────────────╮
-   ╭──┴──╮      │ It looks like 3 tools are outdated.      │
-   │ ◕ ◕ │ ◂    │ Would you like me to update them?        │
-   │  ‿  │      ╰──────────────────────────────────────────╯
-   ╰─────╯
+      ▟███▙
+     ▟█████▙     ╭──────────────────────────────────────────╮
+    ▟█◕███◕█▙  ◂ │ It looks like 3 tools are outdated.     │
+   ▟████‿████▙   │ Would you like me to update them?        │
+  ▟██▘     ▝██▙  ╰──────────────────────────────────────────╯
 ```
 
 Azzy lives in your terminal and:
@@ -110,7 +110,7 @@ Azzy lives in your terminal and:
 - **tells jokes** if the cloud takes longer than 2.5 seconds *("Localhost: the only region with 100% uptime.")*
 - **throws confetti** when an install finishes, and looks genuinely sad when it doesn't
 
-Azzy is an original character. Any resemblance to a certain office-assistant paperclip is purely a spiritual cousin situation.
+Azzy is an "A" with eyes – a friendly nod to the Azure shape, drawn from scratch. Any resemblance to a certain office-assistant paperclip is purely a spiritual cousin situation.
 
 Animations are tasteful and automatically off when you pipe output or run in CI. To turn them off by hand: `azup --no-anim …` or `AZUP_NO_ANIM=1`. `NO_COLOR` is respected too.
 
@@ -193,3 +193,5 @@ CI smoke-tests Windows, macOS and Linux on every push. Release notes live in [CH
 ## License
 
 MIT – see [LICENSE](LICENSE). Go forth and `az` responsibly.
+
+<sub>azup is an independent open-source project and is not affiliated with or endorsed by Microsoft. Azure and PowerShell are trademarks of Microsoft Corporation; Azzy is an original drawing, not the official Azure logo.</sub>

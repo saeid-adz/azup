@@ -36,6 +36,8 @@ def vis(t_in, t_out):
 
 _clip = [0]
 defs, body = [], []
+defs.append('<linearGradient id="aL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8af0ff"/><stop offset="1" stop-color="#2bb5ff"/></linearGradient>'
+            '<linearGradient id="aR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a8fe3"/><stop offset="1" stop-color="#005a9e"/></linearGradient>')
 
 
 def line(parts, row, t_in, t_out, typed=None, x=X0):
@@ -71,16 +73,26 @@ def line(parts, row, t_in, t_out, typed=None, x=X0):
         body.append(f'<text x="{x}" y="{y}" textLength="{n * CW:.1f}" lengthAdjust="spacingAndGlyphs" xml:space="preserve"{clip} opacity="0">{spans}{anim}</text>')
 
 
-def azzy(row, t_in, t_out, msg, eyes="●  ●", mouth="‿"):
-    """Mascot + speech bubble made of text lines."""
-    m = ["    ╷    ", " ╭──┴──╮ ", f" │ {eyes[0]} {eyes[-1]} │ ", f" │  {mouth}  │ ", " ╰─────╯ "]
+def azzy(row, t_in, t_out, msg, look=0):
+    """Azzy (an 'A' with eyes, drawn as vectors) + a speech bubble made of text lines."""
+    k = 0.78
+    cx, top = X0 + 6.5 * CW, Y0 + row * LH - 14
+    blink = ('<animate attributeName="ry" values="9;9;9;1;9;9" keyTimes="0;.4;.45;.48;.52;1" '
+             'dur="4s" repeatCount="indefinite"/>') if SNAP is None else ""
+    g = (f'<g transform="translate({cx:.1f} {top:.1f}) scale({k})" '
+         + (f'opacity="{1 if t_in <= SNAP < t_out else 0}">' if SNAP is not None else 'opacity="0">')
+         + (vis(t_in, t_out) if SNAP is None else "")
+         + '<polygon points="0,0 -64,128 -22,128 0,84" fill="url(#aL)"/>'
+           '<polygon points="0,0 64,128 22,128 0,84" fill="url(#aR)"/>'
+           f'<ellipse cx="-14" cy="54" rx="8" ry="9" fill="#fff">{blink}</ellipse>'
+           f'<ellipse cx="14" cy="54" rx="8" ry="9" fill="#fff">{blink}</ellipse>'
+           f'<circle cx="{-12 + look}" cy="56" r="3.6" fill="#06101f"/><circle cx="{16 + look}" cy="56" r="3.6" fill="#06101f"/>'
+           '<path d="M-11 74q11 9 22 0" stroke="#06101f" stroke-width="3.2" fill="none" stroke-linecap="round"/></g>')
+    body.append(g)
     w = len(msg)
     bub = ["╭" + "─" * (w + 2) + "╮", f"│ {msg} │", "╰" + "─" * (w + 2) + "╯"]
-    for r in range(5):
-        parts = [(m[r], "az")]
-        if 1 <= r <= 3:
-            parts += [("◂ " if r == 2 else "  ", "az"), (bub[r - 1], "dim")]
-        line(parts, row + r, t_in, t_out)
+    for r in range(1, 4):
+        line([("◂ " if r == 2 else "  ", "az"), (bub[r - 1], "dim")], row + r, t_in, t_out, x=X0 + 13 * CW)
 
 
 def bar(i, n, w=18):
@@ -93,8 +105,8 @@ S1, S2, S3, S4 = (0.3, 3.6), (3.6, 9.2), (9.2, 15.4), (15.4, 18.7)
 
 # scene 1: launch + mascot loading
 line([("$ ", "gr"), ("azup", "fg")], 0, S1[0], S1[1], typed=(0.5, 0.6))
-azzy(2, 1.5, 2.6, "⠹ Inspecting your toolbox…", "●  ●", "o")
-azzy(2, 2.6, S1[1], "⠼ Reticulating Azure splines…", "●  ●", "o")
+azzy(2, 1.5, 2.6, "⠹ Inspecting your toolbox…")
+azzy(2, 2.6, S1[1], "⠼ Reticulating Azure splines…")
 
 # scene 2: status + Clippy-style suggestion + menu
 t = S2[0]
@@ -109,7 +121,7 @@ rows2 = [
 ]
 for parts, r in rows2:
     line([("  ", "fg")] + parts, r, t + 0.15 * r, S2[1])
-azzy(8, 5.4, S2[1], "It looks like 2 tools are outdated. Update them?", "●  ●", "‿")
+azzy(8, 5.4, S2[1], "It looks like 2 tools are outdated. Update them?")
 line([("  What now?", "fg")], 14, 6.6, S2[1])
 line([("   ", "fg"), ("❯ ", "az"), ("Update everything", "fg"), ("      2 outdated", "dim")], 15, 6.8, S2[1])
 line([("     Select components…", "dim")], 16, 6.8, S2[1])
@@ -128,9 +140,9 @@ line([("   ✔ ", "gr"), ("Az PowerShell        ", "fg"), ("update   ", "dim"), 
 line([("  ", "fg")] + bar(2, 2) + [(" 2/2", "dim")], 12, 14.5, S3[1])
 
 # scene 4: celebration
-azzy(2, 15.7, S4[1], "All done! Your toolbox is looking sharp.", "●  ●", "‿")
+azzy(2, 15.7, S4[1], "All done! Your toolbox is looking sharp.")
 line([("$ ", "gr"), ("azup joke", "fg")], 8, 16.8, S4[1], typed=(16.8, 0.6))
-azzy(9, 17.5, S4[1], "It works on my subscription.", "◔  ◔", "─")
+azzy(9, 17.5, S4[1], "It works on my subscription.", look=-3)
 
 # confetti
 random.seed(7)
@@ -178,23 +190,22 @@ if SNAP is None:
   <stop offset="0" stop-color="#0078d4"/><stop offset=".5" stop-color="#50e6ff"/><stop offset="1" stop-color="#0078d4"/>
   <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="680 0" dur="4s" repeatCount="indefinite"/>
  </linearGradient>
- <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#50e6ff"/><stop offset="1" stop-color="#0078d4"/></linearGradient>
+ <linearGradient id="aL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8af0ff"/><stop offset="1" stop-color="#2bb5ff"/></linearGradient>
+ <linearGradient id="aR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a8fe3"/><stop offset="1" stop-color="#005a9e"/></linearGradient>
  <clipPath id="tag"><rect x="318" y="156" width="0" height="40"><animate attributeName="width" values="0;0;520;520" keyTimes="0;.1;.55;1" dur="8s" repeatCount="indefinite"/></rect></clipPath>
 </defs>
 <rect width="900" height="230" rx="18" fill="url(#bg)"/>
 {stars}
 <g>
  <animateTransform attributeName="transform" type="translate" values="0 0;0 -9;0 0" dur="3s" repeatCount="indefinite" calcMode="spline" keyTimes="0;.5;1" keySplines=".4 0 .6 1;.4 0 .6 1"/>
- <line x1="150" y1="52" x2="150" y2="72" stroke="#bfe6ff" stroke-width="3" stroke-linecap="round"/>
- <circle cx="150" cy="46" r="7" fill="#ffb900"><animate attributeName="r" values="5;8;5" dur="1.4s" repeatCount="indefinite"/></circle>
- <rect x="95" y="70" width="110" height="88" rx="26" fill="url(#body)"/>
- <rect x="105" y="82" width="90" height="56" rx="18" fill="#06101f"/>
- <ellipse cx="130" cy="106" rx="8" ry="9" fill="#fff"><animate attributeName="ry" values="9;9;9;1;9;9" keyTimes="0;.4;.45;.48;.52;1" dur="4s" repeatCount="indefinite"/></ellipse>
- <ellipse cx="170" cy="106" rx="8" ry="9" fill="#fff"><animate attributeName="ry" values="9;9;9;1;9;9" keyTimes="0;.4;.45;.48;.52;1" dur="4s" repeatCount="indefinite"/></ellipse>
- <circle cx="132" cy="108" r="3.5" fill="#06101f"><animate attributeName="cx" values="132;136;132;128;132" dur="6s" repeatCount="indefinite"/></circle>
- <circle cx="172" cy="108" r="3.5" fill="#06101f"><animate attributeName="cx" values="172;176;172;168;172" dur="6s" repeatCount="indefinite"/></circle>
- <path d="M140 127q10 9 20 0" stroke="#50e6ff" stroke-width="3" fill="none" stroke-linecap="round"/>
- <rect x="82" y="100" width="14" height="26" rx="7" fill="#0078d4"/><rect x="204" y="100" width="14" height="26" rx="7" fill="#0078d4"/>
+ <polygon points="150,44 86,172 128,172 150,128" fill="url(#aL)"/>
+ <polygon points="150,44 214,172 172,172 150,128" fill="url(#aR)"/>
+ <ellipse cx="136" cy="98" rx="8" ry="9" fill="#fff"><animate attributeName="ry" values="9;9;9;1;9;9" keyTimes="0;.4;.45;.48;.52;1" dur="4s" repeatCount="indefinite"/></ellipse>
+ <ellipse cx="164" cy="98" rx="8" ry="9" fill="#fff"><animate attributeName="ry" values="9;9;9;1;9;9" keyTimes="0;.4;.45;.48;.52;1" dur="4s" repeatCount="indefinite"/></ellipse>
+ <circle cx="138" cy="100" r="3.6" fill="#06101f"><animate attributeName="cx" values="138;142;138;134;138" dur="6s" repeatCount="indefinite"/></circle>
+ <circle cx="166" cy="100" r="3.6" fill="#06101f"><animate attributeName="cx" values="166;170;166;162;166" dur="6s" repeatCount="indefinite"/></circle>
+ <path d="M139 118q11 9 22 0" stroke="#06101f" stroke-width="3.2" fill="none" stroke-linecap="round"/>
+ <circle cx="222" cy="52" r="3" fill="#ffb900"><animate attributeName="opacity" values="0;1;0" dur="1.6s" repeatCount="indefinite"/></circle>
 </g>
 <text x="316" y="128" font-family="'Segoe UI', -apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="104" font-weight="800" fill="url(#g)" letter-spacing="-2">azup</text>
 <g clip-path="url(#tag)"><text x="320" y="178" font-family="{FONT}" font-size="19" fill="#bfe6ff">install · update · done. no tears.</text></g>
