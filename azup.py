@@ -42,7 +42,7 @@ try:
 except ImportError:
     msvcrt = None
 
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 REPO = os.environ.get("AZUP_REPO", "saeid-adz/azup")   # set once after publishing
 BRANCH = os.environ.get("AZUP_BRANCH", "main")
 
@@ -672,6 +672,40 @@ def requires(t: Tool):
     return "powershell" if t.kind == "psmod" else "az"
 
 
+_PS_CHECK = {}
+
+
+def ps_works(refresh=False):
+    """Smoke-test PowerShell: (ok, output). A broken pwsh would otherwise fail every module step."""
+    exe = ps_exe()
+    if not exe:
+        return False, "PowerShell was not found on PATH."
+    if refresh or exe not in _PS_CHECK:
+        try:
+            p = subprocess.run(resolve_exe([exe, "-NoProfile", "-NonInteractive", "-Command", "exit 0"]),
+                               capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL,
+                               encoding="utf-8", errors="replace")
+            _PS_CHECK[exe] = (p.returncode == 0, (p.stdout + p.stderr).strip())
+        except (OSError, subprocess.TimeoutExpired) as e:
+            _PS_CHECK[exe] = (False, str(e))
+    return _PS_CHECK[exe]
+
+
+def explain_broken_powershell(info):
+    exe = ps_exe() or "pwsh"
+    lines = [l for l in info.splitlines() if l.strip()]
+    shown = "\n".join("      " + l for l in (lines[:4] + (["      …"] if len(lines) > 4 else [])))
+    print(f"\n  {red('✘')} PowerShell is installed but does not start, so the modules can't be installed.")
+    if shown:
+        print(dim(shown))
+    print("    Check it by hand:  " + bold(f"{exe} -NoProfile -Command '$PSVersionTable.PSVersion'"))
+    if not IS_WIN:
+        print("    Useful details:    " + bold("which -a pwsh; echo $TERM $HOME; ls -ld ~ ."))
+        print("    Other ways to install PowerShell: "
+              "https://learn.microsoft.com/powershell/scripting/install/install-other-linux")
+    print("    Fix it, then re-run azup – it will pick up where it left off.")
+
+
 def has_requirement(req):
     if req == "powershell":
         return ps_exe() is not None
@@ -734,7 +768,13 @@ def stream(cmd, dry):
         if cmd[0] == "brew":
             rc, out = run_tee(cmd)
             if rc != 0 and "untrusted tap" in out and trust_tap(out):
-                rc, _ = run_tee(cmd)          # retry once after trusting
+                rc, out = run_tee(cmd)        # retry once after trusting
+            if rc == 0 and "not linked" in out:
+                # e.g. the first attempt installed the keg but died before linking it
+                m = re.search(r"brew link (\S+)", out)
+                if m:
+                    print("    " + dim(f"$ brew link {m.group(1)}"))
+                    rc, _ = run_tee(["brew", "link", m.group(1)])
             return rc == 0
         return subprocess.call(resolve_exe(cmd)) == 0
     except OSError as e:
@@ -791,6 +831,7 @@ def execute(actions: List[Action], dry=False, yes=False):
         print(f"\n  {azure('▶')} {bold('Refreshing Homebrew index')}")
         stream(["brew", "update"], dry)
     results = []
+    shown_ps = False
     for i, (t, verb) in enumerate(actions, 1):
         req = requires(t)
         refresh_path()
@@ -798,11 +839,21 @@ def execute(actions: List[Action], dry=False, yes=False):
             results.append((t, verb, False, 0.0, f"needs {req} – install it first"))
             print(f"\n  {red('✘')} {t.name}: needs {bold(req)} – install it first")
             continue
+        if not dry and t.kind == "psmod":
+            works, info = ps_works()
+            if not works:
+                if not shown_ps:
+                    explain_broken_powershell(info)
+                    shown_ps = True
+                results.append((t, verb, False, 0.0, "PowerShell does not start"))
+                continue
         label = "Installing" if verb == "install" else "Updating"
         print(f"\n  {progress(i - 1, len(actions))} {dim(f'{i}/{len(actions)}')}  "
               f"{azure('▶')} {bold(f'{label} {t.name}')}")
         t0 = time.time()
         ok = stream(build_cmd(t, verb), dry)
+        if t.key == "pwsh":
+            _PS_CHECK.clear()                 # re-test the freshly installed PowerShell
         results.append((t, verb, ok, time.time() - t0, ""))
     print("\n  " + bold("Summary"))
     for t, verb, ok, dt, note in results:
