@@ -2089,8 +2089,17 @@ def cmd_ctx(a):
 
 def cmd_self_update(a):
     here = os.path.abspath(__file__)
-    if "site-packages" in here or "dist-packages" in here:
-        print(yellow("  azup was installed with pip/pipx – run:  pipx upgrade azup"))
+    low = os.path.realpath(here).lower().replace("\\", "/")
+    if getattr(sys, "frozen", False):
+        exe = os.path.abspath(sys.executable).lower().replace("\\", "/")
+        hint = "winget upgrade saeid-adz.azup" if "/winget/" in exe else "download the latest azup.exe from the GitHub releases page"
+        print(yellow(f"  this azup.exe is a packaged build – update it with:  {hint}"))
+        return 0
+    if "/cellar/azup/" in low:                       # azup's own Homebrew keg, not just Homebrew's Python
+        print(yellow("  azup was installed with Homebrew – run:  brew upgrade azup"))
+        return 0
+    if "site-packages" in low or "dist-packages" in low:
+        print(yellow("  azup was installed with pip/pipx – run:  pipx upgrade azup-cli"))
         return 0
     url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/azup.py"
     try:
@@ -2205,10 +2214,15 @@ def spawn_refresh():
     s["refreshing"] = time.time()
     jsave("state.json", s)
     kw = {"creationflags": 0x00000008 | 0x08000000} if IS_WIN else {"start_new_session": True}
+    env = None
+    if getattr(sys, "frozen", False):
+        # one-file PyInstaller: give the detached child its own extraction dir, since the parent
+        # deletes its own on exit
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
     try:
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "nudge", "refresh"],
+        subprocess.Popen(self_cmd() + ["nudge", "refresh"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         close_fds=True, **kw)
+                         close_fds=True, env=env, **kw)
     except OSError:
         pass
 
@@ -2384,12 +2398,19 @@ def cmd_nudge(a):
 
 
 # ── scheduled updates: launchd (macOS) · systemd or cron (Linux) · Task Scheduler (Windows) ──
+def self_cmd():
+    """Command that re-launches azup: the exe itself when frozen, else python + this script."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
+
+
 def sched_cmd():
-    py = sys.executable
-    if IS_WIN:
-        pw = os.path.join(os.path.dirname(py), "pythonw.exe")           # no console window flashing
-        py = pw if os.path.exists(pw) else py
-    return [py, os.path.abspath(__file__), "update", "--scheduled"]
+    cmd = self_cmd()
+    if IS_WIN and not getattr(sys, "frozen", False):
+        pw = os.path.join(os.path.dirname(cmd[0]), "pythonw.exe")       # no console window flashing
+        cmd[0] = pw if os.path.exists(pw) else cmd[0]
+    return cmd + ["update", "--scheduled"]
 
 
 def sched_path_env():
