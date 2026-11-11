@@ -1,6 +1,7 @@
 # Changelog
 
-## 2.7.0
+## 2.7.1
+- Same as the never-published 2.7.0 (its tag could not be released), now released as 2.7.1.
 - **Now on PyPI** as `azup-cli`: `pipx install azup-cli` (the command is still `azup`).
 - **Windows executable:** `azup.exe` is attached to every release (single file, no Python needed), with a SHA-256 checksum. Scheduled updates and the terminal nudge work from the exe too.
 - `azup self-update` recognises how azup was installed (exe / winget, Homebrew, pip/pipx) and points to the matching upgrade command instead of overwriting a managed install.

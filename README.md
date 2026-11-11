@@ -61,7 +61,7 @@ The package is called `azup-cli`; the command is still `azup`. Windows users can
 
 Open a new terminal and type `azup`. That's the whole setup. (Yes, really. Go get a coffee, or don't – we're not your manager.)
 
-> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.7.0 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.7.0'` first).
+> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.7.1 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.7.1'` first).
 
 > Prefer to read before you pipe to a shell? Good instincts. [`install.sh`](install.sh) and [`install.ps1`](install.ps1) are short and boring on purpose.
 
