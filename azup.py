@@ -2214,10 +2214,15 @@ def spawn_refresh():
     s["refreshing"] = time.time()
     jsave("state.json", s)
     kw = {"creationflags": 0x00000008 | 0x08000000} if IS_WIN else {"start_new_session": True}
+    env = None
+    if getattr(sys, "frozen", False):
+        # one-file PyInstaller: give the detached child its own extraction dir, since the parent
+        # deletes its own on exit
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
     try:
         subprocess.Popen(self_cmd() + ["nudge", "refresh"],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         close_fds=True, **kw)
+                         close_fds=True, env=env, **kw)
     except OSError:
         pass
 

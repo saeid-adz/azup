@@ -26,7 +26,7 @@ jobs:
           echo "tag=$tag azup.py=$py pyproject=$toml"
           [ "$tag" = "$py" ] && [ "$tag" = "$toml" ]
       - name: Changelog has an entry
-        run: grep -q "^## ${GITHUB_REF_NAME#v}\b" CHANGELOG.md
+        run: grep -qxF "## ${GITHUB_REF_NAME#v}" CHANGELOG.md   # exact heading, so a prerelease heading cannot match
 
   build-python:
     needs: verify
