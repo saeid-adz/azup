@@ -2089,8 +2089,17 @@ def cmd_ctx(a):
 
 def cmd_self_update(a):
     here = os.path.abspath(__file__)
-    if "site-packages" in here or "dist-packages" in here:
-        print(yellow("  azup was installed with pip/pipx – run:  pipx upgrade azup"))
+    low = here.lower().replace("\\", "/")
+    if getattr(sys, "frozen", False):
+        exe = os.path.abspath(sys.executable).lower().replace("\\", "/")
+        hint = "winget upgrade saeid-adz.azup" if "/winget/" in exe else "download the latest azup.exe from the GitHub releases page"
+        print(yellow(f"  this azup.exe is a packaged build – update it with:  {hint}"))
+        return 0
+    if "/cellar/" in low or "/homebrew/" in low or "/linuxbrew/" in low:
+        print(yellow("  azup was installed with Homebrew – run:  brew upgrade azup"))
+        return 0
+    if "site-packages" in low or "dist-packages" in low:
+        print(yellow("  azup was installed with pip/pipx – run:  pipx upgrade azup-cli"))
         return 0
     url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/azup.py"
     try:
