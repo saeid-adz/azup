@@ -51,15 +51,17 @@ curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | sh
 irm https://raw.githubusercontent.com/saeid-adz/azup/main/install.ps1 | iex
 ```
 
-**Any OS with pipx**
+**Any OS with pipx** (from PyPI)
 
 ```sh
-pipx install git+https://github.com/saeid-adz/azup
+pipx install azup-cli
 ```
+
+The package is called `azup-cli`; the command is still `azup`. Windows users can also download a standalone `azup.exe` from the [releases page](https://github.com/saeid-adz/azup/releases).
 
 Open a new terminal and type `azup`. That's the whole setup. (Yes, really. Go get a coffee, or don't – we're not your manager.)
 
-> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.6.2 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.6.2'` first).
+> **Want to pin a version?** Installs from a release tag are immutable: `curl -fsSL https://raw.githubusercontent.com/saeid-adz/azup/main/install.sh | AZUP_BRANCH=v2.7.0 sh` (PowerShell: set `$env:AZUP_BRANCH = 'v2.7.0'` first).
 
 > Prefer to read before you pipe to a shell? Good instincts. [`install.sh`](install.sh) and [`install.ps1`](install.ps1) are short and boring on purpose.
 
