@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7.0
+- **Now on PyPI** as `azup-cli`: `pipx install azup-cli` (the command is still `azup`).
+- **Windows executable:** `azup.exe` is attached to every release (single file, no Python needed), with a SHA-256 checksum. Scheduled updates and the terminal nudge work from the exe too.
+- `azup self-update` recognises how azup was installed (exe / winget, Homebrew, pip/pipx) and points to the matching upgrade command instead of overwriting a managed install.
+- Releases are now built and published by a tag-triggered workflow (PyPI Trusted Publishing, no stored tokens).
+
 ## 2.6.2
 - Repository hardening: protected `main` and release tags, immutable releases, CodeQL, Dependabot, secret scanning, pinned least-privilege CI, SECURITY.md / CONTRIBUTING / issue and PR templates.
 - CI: fixed the Python 3.8 job on Ubuntu, added unit tests and installer syntax checks to every run.
