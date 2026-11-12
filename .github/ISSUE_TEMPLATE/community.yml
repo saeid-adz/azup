@@ -1,0 +1,45 @@
+name: Community
+description: Question, feedback, or something else that isn't a bug or feature request
+labels: [community]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for getting in touch! Use this for questions, general feedback, ideas for the project, or showing how you use azup.
+        **Don't paste secrets, tokens, tenant or subscription IDs.** Redact anything private.
+        Found a bug? Use the *Bug report* form. Security problem? Use the private report link instead.
+  - type: dropdown
+    id: topic
+    attributes:
+      label: What is this about?
+      options:
+        - Question / how do I...?
+        - General feedback
+        - Documentation
+        - Showcase / how I use azup
+        - Contributing / getting involved
+        - Other
+    validations: { required: true }
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Tell us what's on your mind. Include context such as what you're trying to achieve.
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: azup version (if relevant)
+      description: "Output of `azup --version`"
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system (if relevant)
+      options: [Windows, macOS, Linux]
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of conduct
+      options:
+        - label: I agree to follow this project's Code of Conduct
+          required: true
